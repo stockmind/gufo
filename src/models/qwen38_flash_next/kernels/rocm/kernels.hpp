@@ -199,16 +199,6 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
 /// out is [batch][m].
 bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
                    std::size_t m, std::size_t k, hipStream_t stream);
-/// Same tile plan and ordered K16 products as DenseF16Gemm, over plain
-/// row-major F16 weights [m][k] instead of Q8_0. Used by the dense Q6_K
-/// projections through their upload-time F16 alias.
-bool DenseF16GemmHalf(const void* w, const __half* x, float* out,
-                      std::size_t batch, std::size_t m, std::size_t k,
-                      hipStream_t stream);
-/// Dequantizes a row-major Q6_K tensor [rows][cols] into row-major F16 at
-/// upload. The value order and scaling mirror ggml's Q6_K dequantization.
-bool DequantQ6KToF16(const void* src, std::size_t rows, std::size_t cols,
-                     void* dst_half, hipStream_t stream);
 
 /// SSM Q8_0 projection fused with its four-tap convolution. Supports
 /// [m=16384,k=2560,channels=10240] and at least 1024 tokens. qkvz retains
