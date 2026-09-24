@@ -104,10 +104,12 @@ bool IsSmallQuantFormat(GgmlType type) {
 /// count; formats are enabled past the validated 4096-row floor as their
 /// dedicated kernels land.
 bool DenseVecWanted(GgmlType type, std::uint32_t rows) {
-  if (rows <= 4096) {
+  if (type == GgmlType::kQ6_K) {
+    // The dedicated warp-per-row GEMV reads each weight block once for the
+    // whole verification batch and beats an N=1 MMQ tile at every row count.
     return true;
   }
-  return type == GgmlType::kQ6_K;
+  return rows <= 4096;
 }
 
 // The tier's tiled kernels compute whole column tiles; below this width the

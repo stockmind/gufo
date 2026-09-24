@@ -55,6 +55,107 @@ __launch_bounds__(32 * token_waves, 1) static __global__
   }
 }
 
+// Dedicated dense GEMV for Q6_K weights. One warp owns one output row and
+// evaluates up to eight tokens against it, so the weight blocks are read once
+// per row rather than once per row and token. The per-lane K mapping and the
+// ordered accumulation reproduce mul_mat_vec_q_moe's per-row arithmetic; the
+// only change is that `unroll` k-blocks are decoded together so their loads
+// overlap, with the partial products still folded into the row sum in block
+// order. This lets the large dense projections use the row-wise GEMV at decode
+// instead of an N=1 MMQ tile that computes fifteen dead columns.
+template<int ncols_dst, int unroll>
+__launch_bounds__(256, 1) static __global__
+    void mul_mat_vec_q6_K(const void* __restrict__ weights,
+                          const block_q8_1* __restrict__ input,
+                          float* __restrict__ output, const uint32_t ncols_x,
+                          const uint32_t nrows_x, const uint32_t stride_col_y) {
+  constexpr int warps_per_block = 8;
+  constexpr int qk = QK_K;
+  constexpr int qi = QI6_K;
+  constexpr int vdr = VDR_Q6_K_Q8_1_MMVQ;
+  constexpr int blocks_per_iter = vdr * 32 / qi;
+  static_assert(blocks_per_iter == 1, "Q6_K GEMV assumes a full warp per block");
+  const int lane = threadIdx.x % 32;
+  const int row = blockIdx.x * warps_per_block + threadIdx.x / 32;
+  if (row >= (int)nrows_x) {
+    return;
+  }
+  const int blocks_per_row = ncols_x / qk;
+  const int row_offset = row * blocks_per_row;
+  const int kqs = vdr * (lane % (qi / vdr));
+  const int kby = qk / QK8_1;
+  float sum[ncols_dst] = {};
+  int kbx = lane / (qi / vdr);
+  for (; kbx + unroll <= blocks_per_row; kbx += unroll) {
+    float part[ncols_dst][unroll];
+#pragma unroll
+    for (int u = 0; u < unroll; ++u)
+#pragma unroll
+      for (int j = 0; j < ncols_dst; ++j)
+        part[j][u] = vec_dot_q6_K_q8_1(
+            weights, input + j * stride_col_y + (kbx + u) * kby,
+            row_offset + kbx + u, kqs);
+#pragma unroll
+    for (int u = 0; u < unroll; ++u)
+#pragma unroll
+      for (int j = 0; j < ncols_dst; ++j)
+        sum[j] = __fadd_rn(sum[j], part[j][u]);
+  }
+  for (; kbx < blocks_per_row; ++kbx) {
+#pragma unroll
+    for (int j = 0; j < ncols_dst; ++j)
+      sum[j] = __fadd_rn(
+          sum[j], vec_dot_q6_K_q8_1(weights,
+                                    input + j * stride_col_y + kbx * kby,
+                                    row_offset + kbx, kqs));
+  }
+#pragma unroll
+  for (int j = 0; j < ncols_dst; ++j) {
+    sum[j] = warp_reduce_sum<32>(sum[j]);
+    if (lane == 0) {
+      output[j * nrows_x + row] = isfinite(sum[j]) ? sum[j] : 0.0f;
+    }
+  }
+}
+
+template<int unroll>
+static void launch_q6_K(const void* weights, const block_q8_1* input,
+                        float* output, int k, int rows, int tokens,
+                        int input_stride, hipStream_t stream) {
+  constexpr int warps_per_block = 8;
+  const dim3 grid((rows + warps_per_block - 1) / warps_per_block);
+  const dim3 block(32 * warps_per_block);
+  switch (tokens) {
+    case 1: mul_mat_vec_q6_K<1, unroll><<<grid, block, 0, stream>>>(weights, input, output, k, rows, input_stride); break;
+    case 2: mul_mat_vec_q6_K<2, unroll><<<grid, block, 0, stream>>>(weights, input, output, k, rows, input_stride); break;
+    case 3: mul_mat_vec_q6_K<3, unroll><<<grid, block, 0, stream>>>(weights, input, output, k, rows, input_stride); break;
+    case 4: mul_mat_vec_q6_K<4, unroll><<<grid, block, 0, stream>>>(weights, input, output, k, rows, input_stride); break;
+    case 5: mul_mat_vec_q6_K<5, unroll><<<grid, block, 0, stream>>>(weights, input, output, k, rows, input_stride); break;
+    case 6: mul_mat_vec_q6_K<6, unroll><<<grid, block, 0, stream>>>(weights, input, output, k, rows, input_stride); break;
+    case 7: mul_mat_vec_q6_K<7, unroll><<<grid, block, 0, stream>>>(weights, input, output, k, rows, input_stride); break;
+    case 8: mul_mat_vec_q6_K<8, unroll><<<grid, block, 0, stream>>>(weights, input, output, k, rows, input_stride); break;
+    default: GGML_ABORT("invalid Q6_K dense vector batch width");
+  }
+}
+
+void mul_mat_vec_q6_K_dispatch(const void* weights, const block_q8_1* input,
+                               float* output, int k, int rows, int tokens,
+                               int input_stride, hipStream_t stream) {
+  GGML_ASSERT(k % QK_K == 0 && rows > 0 && tokens >= 1);
+  switch (tokens) {
+    case 1: launch_q6_K<4>(weights, input, output, k, rows, 1, input_stride, stream); break;
+    case 2: launch_q6_K<4>(weights, input, output, k, rows, 2, input_stride, stream); break;
+    case 3: launch_q6_K<4>(weights, input, output, k, rows, 3, input_stride, stream); break;
+    case 4: launch_q6_K<4>(weights, input, output, k, rows, 4, input_stride, stream); break;
+    case 5: launch_q6_K<4>(weights, input, output, k, rows, 5, input_stride, stream); break;
+    case 6: launch_q6_K<4>(weights, input, output, k, rows, 6, input_stride, stream); break;
+    case 7: launch_q6_K<4>(weights, input, output, k, rows, 7, input_stride, stream); break;
+    case 8: launch_q6_K<4>(weights, input, output, k, rows, 8, input_stride, stream); break;
+    default: GGML_ABORT("invalid Q6_K dense vector batch width");
+  }
+}
+
+
 // Integer matrix products reuse each Q8 weight across up to 48 inputs.
 // Keep four separate K8 sums per wave: merging them into a K32 integer sum
 // would change the scalar kernel's rounded products, FMA chain and reduction.
