@@ -5174,6 +5174,10 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   const int num_kb = static_cast<int>(k / 32);
   const int m_i = static_cast<int>(m);
   const auto* w_bytes = static_cast<const std::uint8_t*>(w);
+  const std::size_t w_row_bytes =
+      kHalfWeights ? static_cast<std::size_t>(k) * 2
+                   : (kQ6Weights ? static_cast<std::size_t>(k / 256) * 210
+                                 : static_cast<std::size_t>(num_kb) * 34);
 
   const int tid = static_cast<int>(threadIdx.x);
   const int wave_id = tid >> 5;
