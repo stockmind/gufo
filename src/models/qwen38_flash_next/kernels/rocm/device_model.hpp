@@ -15,6 +15,9 @@ namespace gufo::models::qwen38_flash_next::rocm {
 /// One weight resident in device memory, still in its GGUF encoding.
 struct DeviceTensor {
   void* data{nullptr};
+  /// Optional row-major F16 copy of a dense Q6_K matrix, built at upload so
+  /// the wide-batch prefill runs on the F16 WMMA tier instead of MMQ.
+  void* f16{nullptr};
   core::GgmlType type{core::GgmlType::kF32};
   std::uint32_t cols{0};
   std::uint32_t rows{0};
