@@ -45,6 +45,10 @@ WeightType EmbeddingType(core::GgmlType type) {
       return WeightType::kQ8_0;
     case core::GgmlType::kF32:
       return WeightType::kF32;
+    case core::GgmlType::kQ6_K:
+      return WeightType::kQ6_K;
+    case core::GgmlType::kIQ4_NL:
+      return WeightType::kIQ4_NL;
     default:
       throw std::logic_error("unsupported Flash-Next embedding format");
   }
