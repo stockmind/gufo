@@ -662,6 +662,40 @@ extern "C" int qfn_mmq_moe_raw(int weight_type, const void* W, const float* X,
   }
 }
 
+extern "C" int qfn_mmq_moe_pair(int weight_type, const void* W_a,
+                                const void* W_b, const float* X,
+                                const int32_t* ids, float* out_a, float* out_b,
+                                int M, int K, int n_tokens, int n_experts,
+                                int n_expert_used, hipStream_t stream) {
+  if (!W_a || !W_b || !out_a || !out_b) {
+    fprintf(stderr, "qfn_mmq_moe_pair: null pointer\n");
+    return -1;
+  }
+  const auto type = static_cast<ggml_type>(weight_type);
+  switch (type) {
+    case GGML_TYPE_IQ2_S:
+      return qfn_mmq_moe_impl<GGML_TYPE_IQ2_S>(
+          "qfn_mmq_iq2_s_moe_pair", W_a, X, ids, out_a, M, K, n_tokens,
+          n_experts, n_expert_used, stream, W_b, out_b);
+    case GGML_TYPE_IQ3_XXS:
+      return qfn_mmq_moe_impl<GGML_TYPE_IQ3_XXS>(
+          "qfn_mmq_iq3_xxs_moe_pair", W_a, X, ids, out_a, M, K, n_tokens,
+          n_experts, n_expert_used, stream, W_b, out_b);
+    case GGML_TYPE_IQ3_S:
+      return qfn_mmq_moe_impl<GGML_TYPE_IQ3_S>(
+          "qfn_mmq_iq3_s_moe_pair", W_a, X, ids, out_a, M, K, n_tokens,
+          n_experts, n_expert_used, stream, W_b, out_b);
+    case GGML_TYPE_IQ4_NL:
+      return qfn_mmq_moe_impl<GGML_TYPE_IQ4_NL>(
+          "qfn_mmq_iq4_nl_moe_pair", W_a, X, ids, out_a, M, K, n_tokens,
+          n_experts, n_expert_used, stream, W_b, out_b);
+    default:
+      fprintf(stderr, "qfn_mmq_moe_pair: unsupported weight type %d\n",
+              weight_type);
+      return -1;
+  }
+}
+
 extern "C" int qfn_mmq_q4_K_moe_pair_unique(
     const void * W_a, const void * W_b, const float * X, const int32_t * ids,
     float * out_a, float * out_b, int M, int K, int n_tokens, int n_experts,
