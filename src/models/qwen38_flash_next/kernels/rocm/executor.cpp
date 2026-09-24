@@ -1812,6 +1812,21 @@ bool Executor::GatedExperts(const DeviceTensor& a, const DeviceTensor& b,
       AssignError(error_msg, "expert vector pair GEMM failed");
       return false;
     }
+  } else if (same_shape &&
+             (a.type == GgmlType::kIQ2_S || a.type == GgmlType::kIQ3_XXS ||
+              a.type == GgmlType::kIQ3_S || a.type == GgmlType::kIQ4_NL)) {
+    // Gate/up share shape, routing and input: build the gather map and
+    // quantize the activations once, then run both MMQ projections back to
+    // back instead of rebuilding both for the second projection.
+    RoutedHints(a, n_tokens);
+    if (qfn_mmq_moe_pair(
+            static_cast<int>(a.type), a.data, b.data, x, ids, out, s_.up_e,
+            static_cast<int>(a.rows), static_cast<int>(a.cols),
+            static_cast<int>(n_tokens), static_cast<int>(a.experts),
+            static_cast<int>(n_used), stream_) != 0) {
+      AssignError(error_msg, "expert pair GEMM failed");
+      return false;
+    }
   } else if (same_shape && a.type == GgmlType::kQ4_K) {
     // The wide Q4_K path shares its gather and tiled quantization as well.
     RoutedHints(a, n_tokens);
