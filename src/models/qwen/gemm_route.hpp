@@ -79,6 +79,7 @@ struct QwenGemmFormatCapabilities {
     case core::GgmlType::kIQ4_NL:
     case core::GgmlType::kIQ4_XS:
     case core::GgmlType::kIQ3_S:
+    case core::GgmlType::kIQ3_XXS:
     case core::GgmlType::kQ5_K:
     case core::GgmlType::kQ6_K:
     case core::GgmlType::kQ8_K:
