@@ -100,6 +100,18 @@ struct block_iq3_xxs {
   std::uint8_t qs[64];
   std::uint8_t scales_and_signs[32];
 };
+
+// IQ2_S: super-block of 256, distinct from IQ2_XXS. A second low-bit format
+// that reuses the same sign-expansion table as IQ3_XXS: the trailing half of
+// the 64-byte qs array holds per-group sign bytes, qh[8] carries two high grid
+// bits per 32-element group, and scales packs two 4-bit group scales per byte.
+// 82 bytes: (half)d + qs[64] + qh[8] + scales[8].
+struct block_iq2_s {
+  std::uint16_t d;
+  std::uint8_t qs[64];
+  std::uint8_t qh[8];
+  std::uint8_t scales[8];
+};
 #pragma pack(pop)
 
 static_assert(sizeof(block_q4_K) == 144, "block_q4_K must be 144 bytes");
@@ -112,6 +124,7 @@ static_assert(sizeof(block_iq4_nl) == 18, "block_iq4_nl must be 18 bytes");
 static_assert(sizeof(block_iq4_xs) == 136, "block_iq4_xs must be 136 bytes");
 static_assert(sizeof(block_iq3_s) == 110, "block_iq3_s must be 110 bytes");
 static_assert(sizeof(block_iq3_xxs) == 98, "block_iq3_xxs must be 98 bytes");
+static_assert(sizeof(block_iq2_s) == 82, "block_iq2_s must be 82 bytes");
 
 /// Non-linear 4-bit codebook shared by IQ4_NL and IQ4_XS.
 inline constexpr std::int8_t kValuesIq4Nl[16] = {
@@ -132,6 +145,7 @@ inline constexpr std::int8_t kValuesIq4Nl[16] = {
       return 32;
     case core::GgmlType::kQ2_K:
     case core::GgmlType::kIQ2_XXS:
+    case core::GgmlType::kIQ2_S:
     case core::GgmlType::kIQ3_XXS:
     case core::GgmlType::kIQ4_XS:
     case core::GgmlType::kIQ3_S:
@@ -216,6 +230,13 @@ void DequantizeIQ3_XXS(const void* src, float* dst, std::size_t k);
 float DotProductIQ3_XXS(const void* row_data, std::span<const float> vec,
                         std::size_t k);
 
+// Dequantize row of IQ2_S to float
+void DequantizeIQ2_S(const void* src, float* dst, std::size_t k);
+
+// Compute dot product of IQ2_S quantized row with FP32 vector
+float DotProductIQ2_S(const void* row_data, std::span<const float> vec,
+                      std::size_t k);
+
 /// Returns the 512-entry IQ3_S grid table (each entry packs four uint8
 /// magnitudes).
 [[nodiscard]] const std::uint32_t* Iq3sGrid() noexcept;
@@ -227,6 +248,10 @@ float DotProductIQ3_XXS(const void* row_data, std::span<const float> vec,
 /// Returns the 128-entry IQ3_XXS/IQ2 sign-expansion table (7-bit index to an
 /// 8-bit per-element sign mask).
 [[nodiscard]] const std::uint8_t* Iq2xsSigns() noexcept;
+
+/// Returns the 1024-entry IQ2_S grid table (each entry packs eight uint8
+/// magnitudes).
+[[nodiscard]] const std::uint64_t* Iq2sGrid() noexcept;
 
 // Compute dot product of Q8_0 quantized row with FP32 vector
 float DotProductQ8_0(const void* row_data, std::span<const float> vec,
