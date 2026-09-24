@@ -2813,8 +2813,13 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
             const int grid_h = __vsub4(grid_pos[1] ^ signs1, signs1);
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-            x_qs[i*MMQ_MMA_TILE_X_K_Q3_K + 8*kqsx + (2*l + 0)] = grid_l;
-            x_qs[i*MMQ_MMA_TILE_X_K_Q3_K + 8*kqsx + (2*l + 1)] = grid_h;
+            // One 8-byte LDS store. Left as two scalar stores the compiler
+            // pairs them into a 64-dword-strided ds_store_2addr, whose two
+            // addresses land on the same of the 32 banks and self-conflict
+            // on gfx1151; the pair is always 8-byte aligned here.
+            *reinterpret_cast<int2 *>(
+                &x_qs[i*MMQ_MMA_TILE_X_K_Q3_K + 8*kqsx + 2*l]) =
+                    make_int2(grid_l, grid_h);
 #else
             x_qs[i*(2*MMQ_TILE_NE_K + 1) + 8*kqsx + (2*l + 0)] = grid_l;
             x_qs[i*(2*MMQ_TILE_NE_K + 1) + 8*kqsx + (2*l + 1)] = grid_h;
@@ -2824,8 +2829,9 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         const int ls = bxi->scales[kqsx];
         const float d = bxi->d;
 #if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-        x_df[i*MMQ_MMA_TILE_X_K_Q3_K                   + 2*kqsx+0] = ((ls &  0x0F)*d + d/2)/4;
-        x_df[i*MMQ_MMA_TILE_X_K_Q3_K                   + 2*kqsx+1] = ((ls >>    4)*d + d/2)/4;
+        *reinterpret_cast<float2 *>(
+            &x_df[i*MMQ_MMA_TILE_X_K_Q3_K + 2*kqsx]) =
+                make_float2(((ls & 0x0F)*d + d/2)/4, ((ls >> 4)*d + d/2)/4);
 #else
         x_df[i*(2*MMQ_TILE_NE_K*2/QI8_0) + i/(QI8_0/4) + 2*kqsx+0] = ((ls &  0x0F)*d + d/2)/4;
         x_df[i*(2*MMQ_TILE_NE_K*2/QI8_0) + i/(QI8_0/4) + 2*kqsx+1] = ((ls >>    4)*d + d/2)/4;
@@ -2877,8 +2883,9 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
             const int grid_h = __vsub4(grid_pos.y ^ signs1, signs1);
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-            x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + (2*l + 0)] = grid_l;
-            x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + (2*l + 1)] = grid_h;
+            *reinterpret_cast<int2 *>(
+                &x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + 2*l]) =
+                    make_int2(grid_l, grid_h);
 #else
             x_qs[i*(2*MMQ_TILE_NE_K + 1) + 8*kqsx + (2*l + 0)] = grid_l;
             x_qs[i*(2*MMQ_TILE_NE_K + 1) + 8*kqsx + (2*l + 1)] = grid_h;
@@ -2944,8 +2951,9 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
             const int grid_h = __vsub4(grid_pos.y ^ signs1, signs1);
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-            x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + (2*l+0)] = grid_l;
-            x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + (2*l+1)] = grid_h;
+            *reinterpret_cast<int2 *>(
+                &x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + 2*l]) =
+                    make_int2(grid_l, grid_h);
 #else
             x_qs[i*(2*MMQ_TILE_NE_K + 1) + 8*kqsx + (2*l+0)] = grid_l;
             x_qs[i*(2*MMQ_TILE_NE_K + 1) + 8*kqsx + (2*l+1)] = grid_h;
