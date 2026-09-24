@@ -193,6 +193,49 @@ extern "C" int qfn_mmq_q8_0_dense(
     return qfn_mmq_dense_impl<GGML_TYPE_Q8_0>("qfn_mmq_q8_0_dense", W, X, out, M, N, K, stream);
 }
 
+// Generic dense entrypoint for the low-bit quantized projections the
+// Flash-Next dense/embedding path decodes (Q4_K/Q5_K/Q6_K/Q5_1/IQ4_NL/
+// IQ4_XS/IQ3_XXS/IQ3_S/IQ2_S), so they run through the WMMA MMQ instead of
+// the element-wise small-matrix kernel.
+extern "C" int qfn_mmq_dense(int weight_type, const void* W, const float* X,
+                             float* out, int M, int N, int K,
+                             hipStream_t stream) {
+  const auto type = static_cast<ggml_type>(weight_type);
+  switch (type) {
+    case GGML_TYPE_Q4_K:
+      return qfn_mmq_dense_impl<GGML_TYPE_Q4_K>("qfn_mmq_q4_K_dense", W, X, out,
+                                                M, N, K, stream);
+    case GGML_TYPE_Q5_K:
+      return qfn_mmq_dense_impl<GGML_TYPE_Q5_K>("qfn_mmq_q5_K_dense", W, X, out,
+                                                M, N, K, stream);
+    case GGML_TYPE_Q6_K:
+      return qfn_mmq_dense_impl<GGML_TYPE_Q6_K>("qfn_mmq_q6_K_dense", W, X, out,
+                                                M, N, K, stream);
+    case GGML_TYPE_Q5_1:
+      return qfn_mmq_dense_impl<GGML_TYPE_Q5_1>("qfn_mmq_q5_1_dense", W, X, out,
+                                                M, N, K, stream);
+    case GGML_TYPE_IQ4_NL:
+      return qfn_mmq_dense_impl<GGML_TYPE_IQ4_NL>("qfn_mmq_iq4_nl_dense", W, X,
+                                                  out, M, N, K, stream);
+    case GGML_TYPE_IQ4_XS:
+      return qfn_mmq_dense_impl<GGML_TYPE_IQ4_XS>("qfn_mmq_iq4_xs_dense", W, X,
+                                                  out, M, N, K, stream);
+    case GGML_TYPE_IQ3_XXS:
+      return qfn_mmq_dense_impl<GGML_TYPE_IQ3_XXS>("qfn_mmq_iq3_xxs_dense", W,
+                                                   X, out, M, N, K, stream);
+    case GGML_TYPE_IQ3_S:
+      return qfn_mmq_dense_impl<GGML_TYPE_IQ3_S>("qfn_mmq_iq3_s_dense", W, X,
+                                                 out, M, N, K, stream);
+    case GGML_TYPE_IQ2_S:
+      return qfn_mmq_dense_impl<GGML_TYPE_IQ2_S>("qfn_mmq_iq2_s_dense", W, X,
+                                                 out, M, N, K, stream);
+    default:
+      fprintf(stderr, "qfn_mmq_dense: unsupported weight type %d\n",
+              weight_type);
+      return -1;
+  }
+}
+
 template <ggml_type type>
 int qfn_mmq_moe_impl(
         const char    * tag,
@@ -735,5 +778,9 @@ template void mul_mat_q_case<GGML_TYPE_IQ3_XXS>(
 template void mul_mat_q_case<GGML_TYPE_IQ3_S>(
     ggml_backend_hip_context&, const mmq_args&, hipStream_t);
 template void mul_mat_q_case<GGML_TYPE_IQ4_NL>(
+    ggml_backend_hip_context&, const mmq_args&, hipStream_t);
+template void mul_mat_q_case<GGML_TYPE_Q6_K>(
+    ggml_backend_hip_context&, const mmq_args&, hipStream_t);
+template void mul_mat_q_case<GGML_TYPE_IQ4_XS>(
     ggml_backend_hip_context&, const mmq_args&, hipStream_t);
 } // namespace qfn_mmq
