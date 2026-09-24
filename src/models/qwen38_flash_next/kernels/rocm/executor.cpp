@@ -99,6 +99,17 @@ bool IsSmallQuantFormat(GgmlType type) {
          type == GgmlType::kIQ2_S;
 }
 
+/// Decode GEMV row limit for the packed formats. At N=1 the tiled MMQ wastes
+/// all but one column, so the row-wise GEMV is preferred regardless of row
+/// count; formats are enabled past the validated 4096-row floor as their
+/// dedicated kernels land.
+bool DenseVecWanted(GgmlType type, std::uint32_t rows) {
+  if (rows <= 4096) {
+    return true;
+  }
+  return type == GgmlType::kQ6_K;
+}
+
 // The tier's tiled kernels compute whole column tiles; below this width the
 // matrix-vector kernels read each weight once per row and win outright.
 constexpr std::uint32_t kVecBatch = 8;
@@ -751,7 +762,8 @@ bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
     }
     return true;
   }
-  if (IsSmallQuantFormat(w.type) && w.rows <= 4096 && q.data != nullptr) {
+  if (IsSmallQuantFormat(w.type) && DenseVecWanted(w.type, w.rows) &&
+      q.data != nullptr) {
     if (w.cols != q.k) {
       AssignError(error_msg, "quantized input width mismatch");
       return false;
@@ -888,7 +900,7 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
     return true;
   }
   if (IsSmallQuantFormat(w.type)) {
-    if (!MatrixRows(n_tokens) && w.rows <= 4096) {
+    if (!MatrixRows(n_tokens) && DenseVecWanted(w.type, w.rows)) {
       Q8Input q;
       if (!Quantize(x, n_tokens, w.cols, &q, error_msg)) {
         return false;
