@@ -6,6 +6,7 @@
 #include <initializer_list>
 
 #include "src/core/hip/weight_upload.hpp"
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 
@@ -60,6 +61,47 @@ struct Uploader {
       *error = message;
     }
     ok = false;
+  }
+
+  // Flash-Next consumes a few weights directly as F32 (the PLE conv). Some
+  // artifacts store them as F16/BF16; widen on the host before upload.
+  DeviceTensor Widen(const TensorRef& t) {
+    if (t.empty() || (t.type != core::GgmlType::kF16 &&
+                      t.type != core::GgmlType::kBF16)) {
+      return Copy(t);
+    }
+    const std::size_t n = t.SizeBytes() / 2;
+    std::vector<float> tmp(n);
+    const auto* src = static_cast<const std::uint16_t*>(t.data);
+    for (std::size_t i = 0; i < n; ++i) {
+      if (t.type == core::GgmlType::kF16) {
+        tmp[i] = gufo::quant::Fp16ToFloat(src[i]);
+      } else {
+        const std::uint32_t u = static_cast<std::uint32_t>(src[i]) << 16U;
+        std::memcpy(&tmp[i], &u, sizeof(float));
+      }
+    }
+    DeviceTensor d;
+    const std::size_t size = n * sizeof(float);
+    void* ptr = nullptr;
+    if (hipMalloc(&ptr, size + kTailMargin) != hipSuccess) {
+      Fail("hipMalloc failed for widened tensor");
+      return d;
+    }
+    allocations.push_back(ptr);
+    bytes += size + kTailMargin;
+    if (hipMemcpy(ptr, tmp.data(), size, hipMemcpyHostToDevice) != hipSuccess) {
+      Fail("widen upload failed");
+      return d;
+    }
+    (void)hipMemsetAsync(static_cast<std::uint8_t*>(ptr) + size, 0, kTailMargin,
+                         nullptr);
+    d.data = ptr;
+    d.type = core::GgmlType::kF32;
+    d.cols = static_cast<std::uint32_t>(t.cols);
+    d.rows = static_cast<std::uint32_t>(t.rows);
+    d.experts = static_cast<std::uint32_t>(t.experts);
+    return d;
   }
 
   DeviceTensor Copy(const TensorRef& t) {
@@ -268,7 +310,7 @@ struct Uploader {
     d.ple_norm_key = Copy(l.ple_norm_key);
     d.ple_norm_query = Copy(l.ple_norm_query);
     d.ple_norm_conv = Copy(l.ple_norm_conv);
-    d.ple_conv1d = Copy(l.ple_conv1d);
+    d.ple_conv1d = Widen(l.ple_conv1d);
     d.router = Stack({&l.router, &l.shexp_gate_inp});
     d.ffn_gate_exps = Copy(l.ffn_gate_exps);
     d.ffn_up_exps = Copy(l.ffn_up_exps);
