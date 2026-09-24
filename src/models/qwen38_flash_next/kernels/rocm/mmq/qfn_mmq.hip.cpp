@@ -43,6 +43,10 @@ extern "C" int qfn_mmq_routed_tile_cols_for_counts(
         const unsigned int *counts, int n_experts) {
 
     if (!counts || n_experts <= 0) return 0;
+    if (const char * env = getenv("QFN_MMQ_TILE_COLS")) {
+        const int forced = atoi(env);
+        if (forced >= 16 && forced <= 128 && forced % 16 == 0) return forced;
+    }
     constexpr int kPanel = 16;
     int best_cols = 0;
     long long best_cost = 0;
