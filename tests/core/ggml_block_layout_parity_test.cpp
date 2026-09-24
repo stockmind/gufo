@@ -21,6 +21,8 @@
 #include "src/core/quant/ggml_dequant.hpp"
 
 using gufo::quant::Fp16ToFloat;
+using gufo::quant::Iq2xsSigns;
+using gufo::quant::Iq3xxsGrid;
 
 namespace {
 
@@ -170,6 +172,32 @@ float Q8_KVal(const std::uint8_t* p, std::size_t index) {
                  static_cast<std::int8_t>(p[4 + index]));  // qs at offset 4
 }
 
+// IQ3_XXS (k=256, block 98B): d at offset 0, qs at offset 2 (64B),
+// scales_and_signs at offset 66 (32B). One little-endian uint32 per
+// 32-element group: top nibble is the 4-bit super-scale, low 28 bits are four
+// 7-bit sign indices; each group of eight is two 256-entry grid lookups.
+float Iq3xxsVal(const std::uint8_t* p, std::size_t index) {
+  const std::uint8_t* qs = p + 2;
+  const std::uint8_t* ss = p + 66;
+  const std::size_t ib32 = index / 32;
+  const std::size_t within = index % 32;
+  const std::size_t l = within / 8;
+  const std::size_t j = within % 8;
+  const std::size_t half = j / 4;
+  const std::size_t jj = j % 4;
+  const std::uint32_t aux =
+      static_cast<std::uint32_t>(ss[4 * ib32]) |
+      (static_cast<std::uint32_t>(ss[4 * ib32 + 1]) << 8U) |
+      (static_cast<std::uint32_t>(ss[4 * ib32 + 2]) << 16U) |
+      (static_cast<std::uint32_t>(ss[4 * ib32 + 3]) << 24U);
+  const float db = Fp16(p, 0) * (0.5f + static_cast<float>(aux >> 28U)) * 0.5f;
+  const std::uint8_t signs = Iq2xsSigns()[(aux >> (7U * l)) & 127U];
+  const auto* grid = reinterpret_cast<const std::uint8_t*>(
+      &Iq3xxsGrid()[qs[(ib32 * 8) + (2 * l) + half]]);
+  const float mag = static_cast<float>(grid[jj]);
+  return (signs & (1U << j)) != 0U ? -db * mag : db * mag;
+}
+
 // ---- test-vector helpers ----
 
 void FillPattern(std::vector<std::uint8_t>& bytes, std::uint64_t seed) {
@@ -272,6 +300,18 @@ int main() {
     for (std::size_t i = 0; i < k; ++i)
       ind[i] = Q3Val(bytes.data(), i);
     failures += Compare("Q3_K", k, ref, ind);
+  }
+
+  // IQ3_XXS (k=256, block 98B).
+  {
+    constexpr std::size_t k = 256;
+    std::vector<std::uint8_t> bytes(98);
+    FillPattern(bytes, 0x3ac1);
+    std::vector<float> ref(k), ind(k);
+    gufo::quant::DequantizeIQ3_XXS(bytes.data(), ref.data(), k);
+    for (std::size_t i = 0; i < k; ++i)
+      ind[i] = Iq3xxsVal(bytes.data(), i);
+    failures += Compare("IQ3XXS", k, ref, ind);
   }
 
   if (failures == 0) {
