@@ -859,6 +859,20 @@ bool Executor::DenseF16Route(const DeviceTensor& w,
 
 bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
                      std::uint32_t n_tokens, std::string* error_msg) const {
+  // Dense Q6_K stays compact but runs wide prefill on the F16 WMMA tier with
+  // an in-LDS dequant, instead of the dequant-bound MMQ path. Decode keeps
+  // its Q6_K GEMV/MMQ.
+  if (MatrixRows(n_tokens) && n_tokens <= options_.max_batch &&
+      w.type == GgmlType::kQ6_K && w.experts == 1 && w.cols % 256 == 0 &&
+      w.cols <= model_->max_half_cols()) {
+    PrepareHalfInput(x, n_tokens, w.cols);
+    if (!DenseF16GemmQ6K(w.data, static_cast<const __half*>(s_.x_half), out,
+                         n_tokens, w.rows, w.cols, stream_)) {
+      AssignError(error_msg, "dense Q6_K F16 GEMM failed");
+      return false;
+    }
+    return true;
+  }
   if (w.type == GgmlType::kQ8_0) {
     if (!MatrixRows(n_tokens)) {
       Q8Input q;

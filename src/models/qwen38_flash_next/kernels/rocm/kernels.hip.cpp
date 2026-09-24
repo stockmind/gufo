@@ -5187,7 +5187,7 @@ struct AttentionProjectionOutput {
 /// and use the same ordered K16 products. y is [batch][m].
 template<int BM, int BN, int BK, int WM, int WN, int kRowGroup = 1,
          bool kHcMix = false, bool kSsmConv = false, bool kAttention = false,
-         bool kHalfWeights = false, bool kBf16 = false>
+         bool kHalfWeights = false, bool kQ6Weights = false, bool kBf16 = false>
 __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const void* __restrict__ w, const __half* __restrict__ x,
     float* __restrict__ y, std::size_t batch, std::size_t m, std::size_t k,
@@ -5197,6 +5197,8 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   static_assert(WM * WN == 8, "256 threads is 8 waves");
   static_assert(BM % (16 * WM) == 0 && BN % (16 * WN) == 0);
   static_assert(!(kBf16 && kHalfWeights));
+  static_assert(!(kHalfWeights && kQ6Weights));
+  static_assert(!(kBf16 && kQ6Weights));
   // 16-bit weight rows staged as they are: F16, or BF16 with BF16
   // activations.
   constexpr bool kRawWeights = kHalfWeights || kBf16;
@@ -5227,6 +5229,10 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   const int num_kb = static_cast<int>(k / 32);
   const int m_i = static_cast<int>(m);
   const auto* w_bytes = static_cast<const std::uint8_t*>(w);
+  const std::size_t w_row_bytes =
+      kRawWeights ? static_cast<std::size_t>(k) * 2
+                  : (kQ6Weights ? static_cast<std::size_t>(k / 256) * 210
+                                : static_cast<std::size_t>(num_kb) * 34);
 
   const int tid = static_cast<int>(threadIdx.x);
   const int wave_id = tid >> 5;
@@ -5276,7 +5282,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const int weight_row = kHcMix ? (r % 4) * (m_i / 4) + r / 4 : r;
     a_ptr[p] = w_bytes +
                static_cast<std::size_t>(a_live[p] ? weight_row : (m_i - 1)) *
-                   static_cast<std::size_t>(num_kb) * (kRawWeights ? 64 : 34);
+                   w_row_bytes;
   }
   const __half* b_ptr[kBPer];
 #pragma unroll
@@ -5289,6 +5295,14 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   }
   uint4 a_codes[kAPer][2];
   uint4 a_half[kRawWeights ? kAPer : 1][4];
+  // Q6_K source bytes for the staged 32-element block: ql and qh are the
+  // per-lane nibbles/high bits, a_sc the two sub-block scales, a_dh the block
+  // scale, a_pos the (half, segment) within the 256-element super-block.
+  uint4 a_ql[kQ6Weights ? kAPer : 1][2];
+  uint4 a_qh[kQ6Weights ? kAPer : 1][2];
+  std::uint16_t a_dh[kQ6Weights ? kAPer : 1];
+  std::uint8_t a_sc[kQ6Weights ? kAPer : 1][2];
+  std::uint8_t a_pos[kQ6Weights ? kAPer : 1];
   std::uint32_t a_d[kAPer];
   uint4 b_data[kBPer][4];
 
@@ -5303,6 +5317,24 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
 #pragma unroll
         for (int c = 0; c < 4; ++c)
           a_half[p][c] = live ? src[c] : make_uint4(0u, 0u, 0u, 0u);
+      } else if constexpr (kQ6Weights) {
+        const int kbl = live ? kb : (num_kb - 1);
+        const int pos = kbl & 7;
+        const std::size_t blk_off =
+            static_cast<std::size_t>(kbl >> 3) * 210;
+        const std::uint8_t* rowp = a_ptr[p] + blk_off;
+        const int half = pos >> 2;
+        const int seg = pos & 3;
+        a_pos[p] = static_cast<std::uint8_t>(pos);
+        a_dh[p] = *reinterpret_cast<const std::uint16_t*>(rowp + 208);
+        a_sc[p][0] = rowp[192 + half * 8 + seg * 2];
+        a_sc[p][1] = rowp[192 + half * 8 + seg * 2 + 1];
+        const std::uint8_t* ql = rowp + half * 64 + ((seg & 1) ? 32 : 0);
+        const std::uint8_t* qh = rowp + 128 + half * 32;
+        __builtin_memcpy(&a_ql[p][0], ql, 16);
+        __builtin_memcpy(&a_ql[p][1], ql + 16, 16);
+        __builtin_memcpy(&a_qh[p][0], qh, 16);
+        __builtin_memcpy(&a_qh[p][1], qh + 16, 16);
       } else {
         const std::uint8_t* blk =
             a_ptr[p] +
@@ -5346,6 +5378,33 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
 #pragma unroll
         for (int c = 0; c < 4; ++c)
           s_a[kk][row][swizzle(row, c)] = a_half[p][c];
+      } else if constexpr (kQ6Weights) {
+        const int seg = a_pos[p] & 3;
+        const std::uint8_t* ql =
+            reinterpret_cast<const std::uint8_t*>(a_ql[p]);
+        const std::uint8_t* qh =
+            reinterpret_cast<const std::uint8_t*>(a_qh[p]);
+        const float d = __half2float(__builtin_bit_cast(__half, a_dh[p]));
+        const float sc0 = static_cast<float>(static_cast<std::int8_t>(a_sc[p][0]));
+        const float sc1 = static_cast<float>(static_cast<std::int8_t>(a_sc[p][1]));
+        __half h[32];
+#pragma unroll
+        for (int i = 0; i < 32; ++i) {
+          const std::uint8_t low =
+              (seg < 2) ? static_cast<std::uint8_t>(ql[i] & 0x0FU)
+                        : static_cast<std::uint8_t>(ql[i] >> 4U);
+          const std::uint8_t high =
+              static_cast<std::uint8_t>((qh[i] >> (2 * seg)) & 0x03U);
+          const int q = static_cast<int>((high << 4U) | low) - 32;
+          h[i] = __float2half(d * ((i < 16) ? sc0 : sc1) *
+                              static_cast<float>(q));
+        }
+#pragma unroll
+        for (int c = 0; c < 4; ++c) {
+          uint4 v;
+          __builtin_memcpy(&v, &h[8 * c], 16);
+          s_a[kk][row][swizzle(row, c)] = v;
+        }
       } else {
         // Q8_0 codes are signed; flipping the sign bit carries q + 128, which
         // the 1152 magic takes back out.
@@ -5876,6 +5935,51 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
                     static_cast<unsigned int>((m + kBM - 1) / kBM));
     hipLaunchKernelGGL((DenseF16GEMMKernel<kBM, kBN, 4, 4, 2>), grid,
                        dim3(kThreads), 0, stream, w, x, out, batch, m, k);
+  }
+  return true;
+}
+
+bool DenseF16GemmQ6K(const void* w, const __half* x, float* out,
+                     std::size_t batch, std::size_t m, std::size_t k,
+                     hipStream_t stream) {
+  if (m == 0 || k == 0 || batch == 0 || k % 256 != 0) {
+    return false;
+  }
+  constexpr int kBM = 128;
+  if (m <= 512 && batch >= 96) {
+    constexpr int kBN = 128;
+    constexpr int kNarrowBM = 64;
+    const dim3 grid(static_cast<unsigned int>((batch + kBN - 1) / kBN),
+                    static_cast<unsigned int>((m + kNarrowBM - 1) / kNarrowBM));
+    hipLaunchKernelGGL(
+        (DenseF16GEMMKernel<kNarrowBM, kBN, 2, 2, 4, 1, false, false, false,
+                            false, true>),
+        grid, dim3(kThreads), 0, stream, w, x, out, batch, m, k);
+  } else if (batch >= 96) {
+    constexpr int kWideBM = 256;
+    constexpr int kBN = 128;
+    const dim3 grid(static_cast<unsigned int>((batch + kBN - 1) / kBN),
+                    static_cast<unsigned int>((m + kWideBM - 1) / kWideBM));
+    if (batch >= 1024 && (((m == 16384 || m == 13312) && k == 2560) ||
+                          (m == 2560 && k == 6144))) {
+      hipLaunchKernelGGL(
+          (DenseF16GEMMKernel<kWideBM, kBN, 2, 8, 1, 1, false, false, false,
+                              false, true>),
+          grid, dim3(kThreads), 0, stream, w, x, out, batch, m, k);
+    } else {
+      hipLaunchKernelGGL(
+          (DenseF16GEMMKernel<kWideBM, kBN, 1, 4, 2, 1, false, false, false,
+                              false, true>),
+          grid, dim3(kThreads), 0, stream, w, x, out, batch, m, k);
+    }
+  } else {
+    constexpr int kBN = 64;
+    const dim3 grid(static_cast<unsigned int>((batch + kBN - 1) / kBN),
+                    static_cast<unsigned int>((m + kBM - 1) / kBM));
+    hipLaunchKernelGGL(
+        (DenseF16GEMMKernel<kBM, kBN, 4, 4, 2, 1, false, false, false, false,
+                            true>),
+        grid, dim3(kThreads), 0, stream, w, x, out, batch, m, k);
   }
   return true;
 }
