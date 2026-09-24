@@ -1556,7 +1556,16 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
     }
     return true;
   }
-  if (IsSmallQuantFormat(w.type) || !MatrixRows(n_tokens)) {
+  if (IsSmallQuantFormat(w.type)) {
+    if (qfn_mmq_dense(static_cast<int>(w.type), w.data, x, out,
+                      static_cast<int>(w.rows), static_cast<int>(n_tokens),
+                      static_cast<int>(w.cols), stream_) != 0) {
+      AssignError(error_msg, "quantized dense projection failed");
+      return false;
+    }
+    return true;
+  }
+  if (!MatrixRows(n_tokens)) {
     SmallGemm(w.data, SmallType(w.type), x, out, n_tokens, w.rows, w.cols,
               stream_);
     return true;
