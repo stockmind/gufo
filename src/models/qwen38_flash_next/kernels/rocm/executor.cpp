@@ -3216,7 +3216,6 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                           checkpoint ? checkpoint->tokens : 0)) {
       return false;
     }
-
     const float* next_norm =
         il + 1 < c.num_layers
             ? (c.IsPleLayer(il + 1) ? nullptr
