@@ -109,6 +109,14 @@ int qfn_mmq_moe_raw(int weight_type, const void* W, const float* X_f32,
                     const int32_t* ids, float* out, int M, int K, int n_tokens,
                     int n_experts, int n_expert_used, hipStream_t stream);
 
+// Paired routed-expert projections over one id map and one activation
+// quantization: both weights share shape, routing and input, so gate/up run
+// back to back without rebuilding the gather map or re-quantizing.
+int qfn_mmq_moe_pair(int weight_type, const void* W_a, const void* W_b,
+                     const float* X_f32, const int32_t* ids, float* out_a,
+                     float* out_b, int M, int K, int n_tokens, int n_experts,
+                     int n_expert_used, hipStream_t stream);
+
 // Generic dense projection out[N][M] = X[N][K] * W[M][K]^T for the low-bit
 // quantized formats, running through the WMMA MMQ.
 int qfn_mmq_dense(int weight_type, const void* W, const float* X, float* out,
