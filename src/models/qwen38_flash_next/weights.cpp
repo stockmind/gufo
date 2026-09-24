@@ -145,8 +145,9 @@ struct Binder {
     const std::string p = "blk." + std::to_string(il) + ".";
     const std::uint64_t hidden = c.hidden_size;
     const std::uint64_t hc_dim = c.HcDim();
-    const auto dense = {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16,
-                        GgmlType::kF32};
+    const auto dense = {GgmlType::kQ8_0, GgmlType::kQ6_K, GgmlType::kQ5_K,
+                        GgmlType::kQ4_K, GgmlType::kQ5_1, GgmlType::kIQ4_NL,
+                        GgmlType::kBF16, GgmlType::kF16, GgmlType::kF32};
     const auto experts = {GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K,
                           GgmlType::kQ5_1, GgmlType::kQ8_0,
                           GgmlType::kIQ4_NL, GgmlType::kIQ3_XXS,
