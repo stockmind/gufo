@@ -1,4 +1,5 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/quant_grids.hpp"
 
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_fp16.h>
@@ -142,6 +143,84 @@ __device__ __forceinline__ float RowElement(const void* row, WeightType type,
       const std::uint32_t code = j < 16 ? (packed & 0x0FU) : (packed >> 4U);
       return d * static_cast<float>(kIq4NlValues[code]);
     }
+    case WeightType::kIQ4_XS: {
+      const auto* blk = static_cast<const std::uint8_t*>(row) + (i / 256) * 136;
+      const float d = __half2float(*reinterpret_cast<const __half*>(blk));
+      const std::uint32_t ib = (i % 256) / 32;
+      const std::uint32_t within = i % 32;
+      const bool high = within >= 16;
+      const std::uint8_t packed = blk[8 + ib * 16 + (within % 16)];
+      const std::uint32_t code = high ? (packed >> 4U) : (packed & 0x0FU);
+      const std::uint16_t scales_h = *reinterpret_cast<const std::uint16_t*>(
+          static_cast<const void*>(blk + 2));
+      const int ls =
+          static_cast<int>((blk[4 + ib / 2] >> (4U * (ib % 2))) & 0x0FU) |
+          static_cast<int>(((scales_h >> (2U * ib)) & 0x03U) << 4U);
+      return d * static_cast<float>(ls - 32) *
+             static_cast<float>(quant_grids::kIq4NlValues[code]);
+    }
+    case WeightType::kIQ3_XXS: {
+      const auto* blk = static_cast<const std::uint8_t*>(row) + (i / 256) * 98;
+      const float d = __half2float(*reinterpret_cast<const __half*>(blk));
+      const std::uint32_t ib32 = (i % 256) / 32;
+      const std::uint32_t within = i % 32;
+      const std::uint32_t l = within / 8;
+      const std::uint32_t j = within % 8;
+      const std::uint32_t half = j / 4;
+      const std::uint32_t jj = j % 4;
+      std::uint32_t aux = 0;
+      __builtin_memcpy(&aux, blk + 66 + 4 * ib32, 4);
+      const float db = d * (0.5F + static_cast<float>(aux >> 28U)) * 0.5F;
+      const std::uint8_t signs = quant_grids::kSignsIq2xs[(aux >> (7U * l)) & 127U];
+      const auto* grid = reinterpret_cast<const std::uint8_t*>(
+          &quant_grids::kIq3xxsGrid[blk[2 + ib32 * 8 + 2 * l + half]]);
+      const float mag = static_cast<float>(grid[jj]);
+      return (signs & (1U << j)) != 0U ? -db * mag : db * mag;
+    }
+    case WeightType::kIQ3_S: {
+      const auto* blk = static_cast<const std::uint8_t*>(row) + (i / 256) * 110;
+      const float d = __half2float(*reinterpret_cast<const __half*>(blk));
+      const std::uint32_t ib32 = (i % 256) / 32;
+      const std::uint32_t within = i % 32;
+      const std::uint32_t l = within / 8;
+      const std::uint32_t j = within % 8;
+      const std::uint32_t half = j / 4;
+      const std::uint32_t jj = j % 4;
+      const std::uint8_t qh_byte = blk[66 + ib32];
+      const std::uint32_t grid_index =
+          static_cast<std::uint32_t>(blk[2 + ib32 * 8 + 2 * l + half]) |
+          ((static_cast<std::uint32_t>(qh_byte)
+            << static_cast<unsigned>(8 - 2 * l - half)) &
+           256U);
+      const auto* grid = reinterpret_cast<const std::uint8_t*>(
+          &quant_grids::kIq3sGrid[grid_index]);
+      const float mag = static_cast<float>(grid[jj]);
+      const bool negate = (blk[74 + ib32 * 4 + l] & (1U << j)) != 0U;
+      const std::uint8_t scale_byte = blk[106 + ib32 / 2];
+      const int nib = (ib32 % 2 == 0) ? (scale_byte & 0x0FU) : (scale_byte >> 4U);
+      const float db = d * static_cast<float>(1 + 2 * nib);
+      return negate ? -db * mag : db * mag;
+    }
+    case WeightType::kIQ2_S: {
+      const auto* blk = static_cast<const std::uint8_t*>(row) + (i / 256) * 82;
+      const float d = __half2float(*reinterpret_cast<const __half*>(blk));
+      const std::uint32_t ib32 = (i % 256) / 32;
+      const std::uint32_t within = i % 32;
+      const std::uint32_t l = within / 8;
+      const std::uint32_t j = within % 8;
+      const std::uint8_t scale_byte = blk[74 + ib32];
+      const int nib = (l < 2) ? (scale_byte & 0x0FU) : (scale_byte >> 4U);
+      const float db = d * (0.5F + static_cast<float>(nib)) * 0.25F;
+      const std::uint32_t idx =
+          static_cast<std::uint32_t>(blk[2 + ib32 * 4 + l]) |
+          ((static_cast<std::uint32_t>(blk[66 + ib32]) << (8U - 2U * l)) &
+           0x300U);
+      const std::uint64_t word = quant_grids::kIq2sGrid[idx];
+      const float mag =
+          static_cast<float>((word >> (8U * j)) & 0xFFU);
+      const std::uint8_t sign = blk[2 + 32 + ib32 * 4 + l];
+      return (sign & (1U << j)) != 0U ? -db * mag : db * mag;
+    }
   }
   return 0.0f;
 }
@@ -166,6 +245,14 @@ __device__ __forceinline__ std::size_t RowBytes(WeightType type,
       return static_cast<std::size_t>(k / 256) * 210;
     case WeightType::kIQ4_NL:
       return static_cast<std::size_t>(k / 32) * 18;
+    case WeightType::kIQ4_XS:
+      return static_cast<std::size_t>(k / 256) * 136;
+    case WeightType::kIQ3_XXS:
+      return static_cast<std::size_t>(k / 256) * 98;
+    case WeightType::kIQ3_S:
+      return static_cast<std::size_t>(k / 256) * 110;
+    case WeightType::kIQ2_S:
+      return static_cast<std::size_t>(k / 256) * 82;
   }
   return 0;
 }
@@ -5783,6 +5870,18 @@ void SmallGemm(const void* w, WeightType type, const float* x, float* out,
     case WeightType::kIQ4_NL:
       return SmallGemmForType<WeightType::kIQ4_NL>(w, x, out, n_tokens, m, k,
                                                    stream);
+    case WeightType::kIQ4_XS:
+      return SmallGemmForType<WeightType::kIQ4_XS>(w, x, out, n_tokens, m, k,
+                                                   stream);
+    case WeightType::kIQ3_XXS:
+      return SmallGemmForType<WeightType::kIQ3_XXS>(w, x, out, n_tokens, m, k,
+                                                    stream);
+    case WeightType::kIQ3_S:
+      return SmallGemmForType<WeightType::kIQ3_S>(w, x, out, n_tokens, m, k,
+                                                  stream);
+    case WeightType::kIQ2_S:
+      return SmallGemmForType<WeightType::kIQ2_S>(w, x, out, n_tokens, m, k,
+                                                  stream);
     default:
       throw std::logic_error("unsupported small projection format");
   }
