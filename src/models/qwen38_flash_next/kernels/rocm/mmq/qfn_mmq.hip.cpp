@@ -236,6 +236,34 @@ extern "C" int qfn_mmq_dense(int weight_type, const void* W, const float* X,
   }
 }
 
+// Decode-time GEMV for the quantized dense projections: each weight row is
+// reduced by one warp with the per-type vec_dot, reusing the routed-expert
+// vector kernel with a single zero expert id so the weight base is expert 0.
+extern "C" int qfn_mmq_dense_vec(int weight_type, const void* W,
+                                 const void* X_q8, float* out, int M, int N,
+                                 int K, hipStream_t stream) {
+  const auto type = static_cast<ggml_type>(weight_type);
+  if (!W || !X_q8 || !out || M <= 0 || N <= 0 || K <= 0 || K % 32 != 0) {
+    fprintf(stderr, "qfn_mmq_dense_vec: bad arguments M=%d N=%d K=%d\n", M, N, K);
+    return -1;
+  }
+  const int dev = ggml_hip_get_device();
+  ggml_backend_hip_context* ctx = get_ctx_for_device(dev);
+  if (!ctx) {
+    fprintf(stderr, "qfn_mmq_dense_vec: no HIP context\n");
+    return -1;
+  }
+  ggml_hip_pool_alloc<int32_t> ids(ctx->pool(), N);
+  if (hipMemsetAsync(ids.get(), 0, (std::size_t)N * sizeof(int32_t), stream) !=
+      hipSuccess) {
+    return -2;
+  }
+  const int input_stride = GGML_PAD(K, MATRIX_ROW_PADDING) / QK8_1;
+  mul_mat_vec_moe_dispatch(W, type, static_cast<const block_q8_1*>(X_q8),
+                           ids.get(), out, K, M, N, 1, input_stride, stream);
+  return hipGetLastError() == hipSuccess ? 0 : -3;
+}
+
 template <ggml_type type>
 int qfn_mmq_moe_impl(
         const char    * tag,
