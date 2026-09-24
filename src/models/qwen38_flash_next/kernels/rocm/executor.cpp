@@ -854,20 +854,6 @@ bool Executor::DenseF16Route(const DeviceTensor& w,
 
 bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
                      std::uint32_t n_tokens, std::string* error_msg) const {
-  // Dense Q6_K carries an upload-time F16 alias. Wide prefill runs it on the
-  // same WMMA tier as Q8_0 (where the alias exists and fits the staging
-  // buffer); decode and any other shape keep the Q6_K path.
-  if (MatrixRows(n_tokens) && n_tokens <= options_.max_batch &&
-      w.type == GgmlType::kQ6_K && w.f16 != nullptr && w.cols % 256 == 0 &&
-      w.cols <= model_->max_half_cols()) {
-    PrepareHalfInput(x, n_tokens, w.cols);
-    if (!DenseF16GemmHalf(w.f16, static_cast<const __half*>(s_.x_half), out,
-                          n_tokens, w.rows, w.cols, stream_)) {
-      AssignError(error_msg, "dense Q6_K F16 GEMM failed");
-      return false;
-    }
-    return true;
-  }
   if (w.type == GgmlType::kQ8_0) {
     if (!MatrixRows(n_tokens)) {
       Q8Input q;
