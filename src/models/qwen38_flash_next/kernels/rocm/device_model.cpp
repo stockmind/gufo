@@ -136,6 +136,11 @@ struct Uploader {
     if (t.type == core::GgmlType::kQ8_0 && t.experts == 1) {
       max_q8_cols = std::max<std::size_t>(max_q8_cols, t.cols);
     }
+    // Dense Q6_K runs on the F16 WMMA tier at wide batch, so its activation
+    // staging width must be covered by the F16 buffer.
+    if (t.type == core::GgmlType::kQ6_K && t.experts == 1) {
+      max_half_cols = std::max<std::size_t>(max_half_cols, t.cols);
+    }
     return d;
   }
 
