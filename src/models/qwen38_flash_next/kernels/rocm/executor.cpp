@@ -2005,7 +2005,6 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                           session.max_context_, sparse, error_msg)) {
       return false;
     }
-
     // Each combine also norms the residual for the mixer that follows it,
     // unless PLE rewrites the residual first.
     Combine(s_.res, l.hc_ffn.norm.f32(), n);
