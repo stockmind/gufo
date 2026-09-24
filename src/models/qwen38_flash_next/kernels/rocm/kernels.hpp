@@ -192,6 +192,12 @@ bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
                         hipStream_t stream);
 bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
                   std::size_t m, std::size_t k, hipStream_t stream);
+/// Same F16 WMMA tier and tile plan, but the weights are compact row-major
+/// Q6_K [m][k] dequantized to F16 in LDS. Avoids both the MMQ path and the
+/// 2x weight bytes of a materialized F16 copy. k must be a multiple of 256.
+bool DenseF16GemmQ6K(const void* w, const __half* x, float* out,
+                     std::size_t batch, std::size_t m, std::size_t k,
+                     hipStream_t stream);
 
 /// SSM Q8_0 projection fused with its four-tap convolution. Supports
 /// [m=16384,k=2560,channels=10240] and at least 1024 tokens. qkvz retains
