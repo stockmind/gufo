@@ -358,7 +358,9 @@ static int moe_vector_projection(int weight_type, const void* W,
   constexpr const char* tag = "qfn_mmq_moe_vec";
   const auto type = static_cast<ggml_type>(weight_type);
   if (type != GGML_TYPE_Q4_K && type != GGML_TYPE_Q5_K &&
-      type != GGML_TYPE_Q5_1 && type != GGML_TYPE_Q8_0) {
+      type != GGML_TYPE_Q5_1 && type != GGML_TYPE_Q8_0 &&
+      type != GGML_TYPE_IQ2_S && type != GGML_TYPE_IQ3_XXS &&
+      type != GGML_TYPE_IQ3_S && type != GGML_TYPE_IQ4_NL) {
     fprintf(stderr, "%s: unsupported weight type %d\n", tag, weight_type);
     return -1;
   }
@@ -593,6 +595,37 @@ extern "C" int qfn_mmq_q6_K_moe_pair(
         W_b, out_b);
 }
 
+// Generic routed-expert entrypoint for the low-bit i-quants that appear in
+// dynamic quantizations of this model (IQ2_S / IQ3_XXS / IQ3_S / IQ4_NL).
+extern "C" int qfn_mmq_moe_raw(int weight_type, const void* W, const float* X,
+                               const int32_t* ids, float* out, int M, int K,
+                               int n_tokens, int n_experts, int n_expert_used,
+                               hipStream_t stream) {
+  const auto type = static_cast<ggml_type>(weight_type);
+  switch (type) {
+    case GGML_TYPE_IQ2_S:
+      return qfn_mmq_moe_impl<GGML_TYPE_IQ2_S>(
+          "qfn_mmq_iq2_s_moe_raw", W, X, ids, out, M, K, n_tokens, n_experts,
+          n_expert_used, stream, nullptr, nullptr);
+    case GGML_TYPE_IQ3_XXS:
+      return qfn_mmq_moe_impl<GGML_TYPE_IQ3_XXS>(
+          "qfn_mmq_iq3_xxs_moe_raw", W, X, ids, out, M, K, n_tokens, n_experts,
+          n_expert_used, stream, nullptr, nullptr);
+    case GGML_TYPE_IQ3_S:
+      return qfn_mmq_moe_impl<GGML_TYPE_IQ3_S>(
+          "qfn_mmq_iq3_s_moe_raw", W, X, ids, out, M, K, n_tokens, n_experts,
+          n_expert_used, stream, nullptr, nullptr);
+    case GGML_TYPE_IQ4_NL:
+      return qfn_mmq_moe_impl<GGML_TYPE_IQ4_NL>(
+          "qfn_mmq_iq4_nl_moe_raw", W, X, ids, out, M, K, n_tokens, n_experts,
+          n_expert_used, stream, nullptr, nullptr);
+    default:
+      fprintf(stderr, "qfn_mmq_moe_raw: unsupported weight type %d\n",
+              weight_type);
+      return -1;
+  }
+}
+
 extern "C" int qfn_mmq_q4_K_moe_pair_unique(
     const void * W_a, const void * W_b, const float * X, const int32_t * ids,
     float * out_a, float * out_b, int M, int K, int n_tokens, int n_experts,
@@ -739,5 +772,13 @@ template void mul_mat_q_case<GGML_TYPE_Q5_1>(
 template void mul_mat_q_case<GGML_TYPE_Q5_K>(
     ggml_backend_hip_context&, const mmq_args&, hipStream_t);
 template void mul_mat_q_case<GGML_TYPE_Q6_K>(
+    ggml_backend_hip_context&, const mmq_args&, hipStream_t);
+template void mul_mat_q_case<GGML_TYPE_IQ2_S>(
+    ggml_backend_hip_context&, const mmq_args&, hipStream_t);
+template void mul_mat_q_case<GGML_TYPE_IQ3_XXS>(
+    ggml_backend_hip_context&, const mmq_args&, hipStream_t);
+template void mul_mat_q_case<GGML_TYPE_IQ3_S>(
+    ggml_backend_hip_context&, const mmq_args&, hipStream_t);
+template void mul_mat_q_case<GGML_TYPE_IQ4_NL>(
     ggml_backend_hip_context&, const mmq_args&, hipStream_t);
 } // namespace qfn_mmq

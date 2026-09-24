@@ -104,4 +104,9 @@ int qfn_mmq_q5_K_moe_raw(
     int M, int K, int n_tokens, int n_experts, int n_expert_used,
     hipStream_t stream);
 
+// Generic routed-expert projection for GGML IQ2_S / IQ3_XXS / IQ3_S / IQ4_NL.
+int qfn_mmq_moe_raw(int weight_type, const void* W, const float* X_f32,
+                    const int32_t* ids, float* out, int M, int K, int n_tokens,
+                    int n_experts, int n_expert_used, hipStream_t stream);
+
 }

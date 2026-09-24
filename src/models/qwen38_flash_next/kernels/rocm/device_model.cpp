@@ -268,15 +268,10 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const ModelWeights& w, const core::GgufReader& reader,
     const MtpWeights* mtp, const core::GgufReader* mtp_reader,
     std::string* error_msg) {
-  // The CPU reference also reads Q6_K, but the production embedding, dense
-  // and routed kernels do not. Reject it before allocating device weights.
-  const auto supported = [&](const TensorRef& t) {
-    if (t.type != core::GgmlType::kQ6_K)
-      return true;
-    if (error_msg != nullptr)
-      *error_msg = "unsupported HIP tensor format Q6_K: " + std::string(t.name);
-    return false;
-  };
+  // The binder already restricts every tensor to a format the runtime can
+  // decode. Q6_K is now read by the embedding (RowElement) and small-matrix
+  // (SmallGemm) kernels, so no per-format rejection is needed here.
+  const auto supported = [&](const TensorRef&) { return true; };
   const auto layer_supported = [&](const LayerWeights& l) {
     return supported(l.ffn_gate_exps) && supported(l.ffn_up_exps) &&
            supported(l.ffn_down_exps);

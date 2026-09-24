@@ -105,7 +105,26 @@ __device__ __forceinline__ float Bf16ToF32(std::uint16_t h) {
   return __uint_as_float(static_cast<std::uint32_t>(h) << 16);
 }
 
-/// Reads element i of a Q8_0 / F32 / BF16 / F16 row.
+/// Reads element i of a Q8_0 / F32 / BF16 / F16 / K-quant / IQ4_NL row.
+__device__ __forceinline__ std::uint8_t QKScaleMin(std::size_t index,
+                                                   const std::uint8_t* packed,
+                                                   std::uint8_t& scale,
+                                                   std::uint8_t& min) {
+  if (index < 4) {
+    scale = packed[index] & 0x3FU;
+    min = packed[index + 4] & 0x3FU;
+    return 0;
+  }
+  scale = static_cast<std::uint8_t>((packed[index + 4] & 0x0FU) |
+                                    ((packed[index - 4] >> 6U) << 4U));
+  min = static_cast<std::uint8_t>((packed[index + 4] >> 4U) |
+                                  ((packed[index] >> 6U) << 4U));
+  return 0;
+}
+
+__device__ inline constexpr std::int8_t kIq4NlValues[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+
 __device__ __forceinline__ float RowElement(const void* row, WeightType type,
                                             std::uint32_t i) {
   switch (type) {
@@ -122,6 +141,81 @@ __device__ __forceinline__ float RowElement(const void* row, WeightType type,
           static_cast<const void*>(blk + 2))[i % 32];
       return __half2float(d) * static_cast<float>(q);
     }
+    case WeightType::kQ5_1: {
+      const auto* blk = static_cast<const std::uint8_t*>(row) + (i / 32) * 24;
+      const float d = __half2float(*reinterpret_cast<const __half*>(blk));
+      const float m = __half2float(*reinterpret_cast<const __half*>(blk + 2));
+      const std::uint32_t qh =
+          *reinterpret_cast<const std::uint32_t*>(blk + 4);
+      const std::uint32_t j = i % 32;
+      const std::uint8_t packed = blk[8 + (j % 16)];
+      const std::uint32_t nib = j < 16 ? (packed & 0x0FU) : (packed >> 4U);
+      const std::uint32_t q = nib + (((qh >> j) & 1U) << 4U);
+      return d * static_cast<float>(q) + m;
+    }
+    case WeightType::kQ4_K: {
+      const auto* blk = static_cast<const std::uint8_t*>(row) + (i / 256) * 144;
+      const float d = __half2float(*reinterpret_cast<const __half*>(blk));
+      const float dmin = __half2float(*reinterpret_cast<const __half*>(blk + 2));
+      const std::uint32_t group = (i % 256) / 32;
+      const std::uint32_t lane = i % 32;
+      const std::uint8_t packed = blk[16 + (group / 2) * 32 + lane];
+      const std::uint8_t quant = (group & 1U) ? (packed >> 4U) : (packed & 0x0FU);
+      std::uint8_t sc = 0;
+      std::uint8_t mn = 0;
+      QKScaleMin(group, blk + 4, sc, mn);
+      return d * static_cast<float>(sc) * static_cast<float>(quant) -
+             dmin * static_cast<float>(mn);
+    }
+    case WeightType::kQ5_K: {
+      const auto* blk = static_cast<const std::uint8_t*>(row) + (i / 256) * 176;
+      const float d = __half2float(*reinterpret_cast<const __half*>(blk));
+      const float dmin = __half2float(*reinterpret_cast<const __half*>(blk + 2));
+      const std::uint32_t gg = (i % 256) / 64;
+      const std::uint32_t wv = i % 64;
+      const std::uint32_t lane = wv % 32;
+      const std::uint8_t qb = blk[48 + gg * 32 + lane];
+      const std::uint32_t quant4 = wv < 32 ? (qb & 0x0FU) : (qb >> 4U);
+      const std::uint8_t qhb = blk[16 + lane];
+      const std::uint32_t bit = 2U * gg + (wv < 32 ? 0U : 1U);
+      const std::uint32_t quant = quant4 + (((qhb >> bit) & 1U) << 4U);
+      std::uint8_t sc = 0;
+      std::uint8_t mn = 0;
+      QKScaleMin(2U * gg + (wv < 32 ? 0U : 1U), blk + 4, sc, mn);
+      return d * static_cast<float>(sc) * static_cast<float>(quant) -
+             dmin * static_cast<float>(mn);
+    }
+    case WeightType::kQ6_K: {
+      const auto* blk = static_cast<const std::uint8_t*>(row) + (i / 256) * 210;
+      const float d = __half2float(*reinterpret_cast<const __half*>(blk + 208));
+      const std::uint32_t half = (i % 256) / 128;
+      const std::uint32_t within = i % 128;
+      const std::uint32_t seg = within / 32;
+      const std::uint32_t lane = within % 32;
+      const std::uint32_t ql_base = half * 64;
+      const std::uint8_t qh = blk[128 + half * 32 + lane];
+      std::uint32_t low = 0;
+      std::uint32_t high = 0;
+      switch (seg) {
+        case 0: low = blk[ql_base + lane] & 0x0FU; high = qh & 0x03U; break;
+        case 1: low = blk[ql_base + 32 + lane] & 0x0FU; high = (qh >> 2U) & 0x03U; break;
+        case 2: low = blk[ql_base + lane] >> 4U; high = (qh >> 4U) & 0x03U; break;
+        default: low = blk[ql_base + 32 + lane] >> 4U; high = (qh >> 6U) & 0x03U; break;
+      }
+      const std::uint32_t si = half * 8 + (lane / 16) + seg * 2;
+      const auto q = static_cast<std::int8_t>((high << 4U | low) - 32);
+      const auto scale =
+          static_cast<const std::int8_t*>(static_cast<const void*>(blk + 192))[si];
+      return d * static_cast<float>(scale) * static_cast<float>(q);
+    }
+    case WeightType::kIQ4_NL: {
+      const auto* blk = static_cast<const std::uint8_t*>(row) + (i / 32) * 18;
+      const float d = __half2float(*reinterpret_cast<const __half*>(blk));
+      const std::uint32_t j = i % 32;
+      const std::uint8_t packed = blk[2 + (j % 16)];
+      const std::uint32_t code = j < 16 ? (packed & 0x0FU) : (packed >> 4U);
+      return d * static_cast<float>(kIq4NlValues[code]);
+    }
   }
   return 0.0f;
 }
@@ -136,6 +230,16 @@ __device__ __forceinline__ std::size_t RowBytes(WeightType type,
       return static_cast<std::size_t>(k) * 2;
     case WeightType::kQ8_0:
       return static_cast<std::size_t>(k / 32) * 34;
+    case WeightType::kQ5_1:
+      return static_cast<std::size_t>(k / 32) * 24;
+    case WeightType::kQ4_K:
+      return static_cast<std::size_t>(k / 256) * 144;
+    case WeightType::kQ5_K:
+      return static_cast<std::size_t>(k / 256) * 176;
+    case WeightType::kQ6_K:
+      return static_cast<std::size_t>(k / 256) * 210;
+    case WeightType::kIQ4_NL:
+      return static_cast<std::size_t>(k / 32) * 18;
   }
   return 0;
 }
@@ -6470,6 +6574,21 @@ void SmallGemm(const void* w, WeightType type, const float* x, float* out,
     case WeightType::kF16:
       return SmallGemmForType<WeightType::kF16>(w, x, out, n_tokens, m, k,
                                                 stream);
+    case WeightType::kQ5_1:
+      return SmallGemmForType<WeightType::kQ5_1>(w, x, out, n_tokens, m, k,
+                                                 stream);
+    case WeightType::kQ4_K:
+      return SmallGemmForType<WeightType::kQ4_K>(w, x, out, n_tokens, m, k,
+                                                 stream);
+    case WeightType::kQ5_K:
+      return SmallGemmForType<WeightType::kQ5_K>(w, x, out, n_tokens, m, k,
+                                                 stream);
+    case WeightType::kQ6_K:
+      return SmallGemmForType<WeightType::kQ6_K>(w, x, out, n_tokens, m, k,
+                                                 stream);
+    case WeightType::kIQ4_NL:
+      return SmallGemmForType<WeightType::kIQ4_NL>(w, x, out, n_tokens, m, k,
+                                                   stream);
     default:
       throw std::logic_error("unsupported small projection format");
   }
