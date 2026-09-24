@@ -107,4 +107,8 @@ int qfn_mmq_moe_raw(int weight_type, const void* W, const float* X_f32,
 int qfn_mmq_dense(int weight_type, const void* W, const float* X, float* out,
                   int M, int N, int K, hipStream_t stream);
 
+// Decode-time GEMV over Q8_1 activations for the same quantized formats.
+int qfn_mmq_dense_vec(int weight_type, const void* W, const void* X_q8,
+                      float* out, int M, int N, int K, hipStream_t stream);
+
 }
