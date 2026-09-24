@@ -131,7 +131,7 @@ static constexpr __device__ int get_mmq_x_max_device() {
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
 }
 
-inline constexpr int QFN_WMMA_MMQ_Y = 128;
+inline constexpr int QFN_WMMA_MMQ_Y = 64;
 static_assert(QFN_WMMA_MMQ_Y == 32 ||
               QFN_WMMA_MMQ_Y == 64 ||
               QFN_WMMA_MMQ_Y == 128,
