@@ -253,12 +253,19 @@ extern "C" int qfn_mmq_dense_vec(int weight_type, const void* W,
     fprintf(stderr, "qfn_mmq_dense_vec: no HIP context\n");
     return -1;
   }
+  const int input_stride = GGML_PAD(K, MATRIX_ROW_PADDING) / QK8_1;
+  if (type == GGML_TYPE_Q6_K && K % QK_K == 0 && N <= 8) {
+    // A warp-owned row GEMV, avoiding the zero-expert id buffer the routed
+    // path needs and reusing each weight block across the verification batch.
+    mul_mat_vec_q6_K_dispatch(W, static_cast<const block_q8_1*>(X_q8), out, K,
+                              M, N, input_stride, stream);
+    return hipGetLastError() == hipSuccess ? 0 : -3;
+  }
   ggml_hip_pool_alloc<int32_t> ids(ctx->pool(), N);
   if (hipMemsetAsync(ids.get(), 0, (std::size_t)N * sizeof(int32_t), stream) !=
       hipSuccess) {
     return -2;
   }
-  const int input_stride = GGML_PAD(K, MATRIX_ROW_PADDING) / QK8_1;
   mul_mat_vec_moe_dispatch(W, type, static_cast<const block_q8_1*>(X_q8),
                            ids.get(), out, K, M, N, 1, input_stride, stream);
   return hipGetLastError() == hipSuccess ? 0 : -3;
