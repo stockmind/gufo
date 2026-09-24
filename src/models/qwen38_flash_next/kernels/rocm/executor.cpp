@@ -82,6 +82,12 @@ WeightType SmallType(GgmlType type) {
       return WeightType::kIQ4_NL;
     case GgmlType::kIQ4_XS:
       return WeightType::kIQ4_XS;
+    case GgmlType::kIQ3_XXS:
+      return WeightType::kIQ3_XXS;
+    case GgmlType::kIQ3_S:
+      return WeightType::kIQ3_S;
+    case GgmlType::kIQ2_S:
+      return WeightType::kIQ2_S;
     default:
       throw std::logic_error("unsupported Flash-Next matrix format");
   }
@@ -93,7 +99,9 @@ WeightType SmallType(GgmlType type) {
 bool IsSmallQuantFormat(GgmlType type) {
   return type == GgmlType::kQ5_1 || type == GgmlType::kQ4_K ||
          type == GgmlType::kQ5_K || type == GgmlType::kQ6_K ||
-         type == GgmlType::kIQ4_NL;
+         type == GgmlType::kIQ4_NL || type == GgmlType::kIQ4_XS ||
+         type == GgmlType::kIQ3_XXS || type == GgmlType::kIQ3_S ||
+         type == GgmlType::kIQ2_S;
 }
 
 // The tier's tiled kernels compute whole column tiles; below this width the

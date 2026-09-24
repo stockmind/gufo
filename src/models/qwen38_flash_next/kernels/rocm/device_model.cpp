@@ -19,6 +19,25 @@ namespace {
 /// activation padding and contribute nothing).
 constexpr std::size_t kTailMargin = 4096;
 
+/// Formats whose rows can be concatenated verbatim into one device tensor and
+/// decoded in place by the small-matrix / embedding kernels.
+bool IsStackQuant(core::GgmlType type) {
+  switch (type) {
+    case core::GgmlType::kQ5_1:
+    case core::GgmlType::kQ4_K:
+    case core::GgmlType::kQ5_K:
+    case core::GgmlType::kQ6_K:
+    case core::GgmlType::kIQ4_NL:
+    case core::GgmlType::kIQ4_XS:
+    case core::GgmlType::kIQ3_XXS:
+    case core::GgmlType::kIQ3_S:
+    case core::GgmlType::kIQ2_S:
+      return true;
+    default:
+      return false;
+  }
+}
+
 struct Conversion {
   void* source;
   void* destination;
@@ -131,8 +150,9 @@ struct Uploader {
     const core::GgmlType type = (*parts.begin())->type;
     for (const TensorRef* t : parts) {
       if (t->empty() || t->type != type || t->cols != (*parts.begin())->cols ||
-          (type != core::GgmlType::kF32 && type != core::GgmlType::kQ8_0)) {
-        Fail("stacked upload needs F32 or Q8_0 tensors of one shape");
+          (type != core::GgmlType::kF32 && type != core::GgmlType::kQ8_0 &&
+           !IsStackQuant(type))) {
+        Fail("stacked upload needs same-shape F32, Q8_0 or quantized tensors");
         return d;
       }
       rows += t->rows;
@@ -162,6 +182,15 @@ struct Uploader {
       d.cols = static_cast<std::uint32_t>((*parts.begin())->cols);
       d.rows = static_cast<std::uint32_t>(rows);
       max_q8_cols = std::max<std::size_t>(max_q8_cols, d.cols);
+      return d;
+    }
+    if (IsStackQuant(type)) {
+      (void)hipMemsetAsync(static_cast<std::uint8_t*>(ptr) + size, 0,
+                           kTailMargin, nullptr);
+      d.data = ptr;
+      d.type = type;
+      d.cols = static_cast<std::uint32_t>((*parts.begin())->cols);
+      d.rows = static_cast<std::uint32_t>(rows);
       return d;
     }
     const std::size_t count = size / sizeof(float);
