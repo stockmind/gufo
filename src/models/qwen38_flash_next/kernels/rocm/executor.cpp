@@ -65,9 +65,30 @@ WeightType SmallType(GgmlType type) {
       return WeightType::kQ8_0;
     case GgmlType::kF32:
       return WeightType::kF32;
+    case GgmlType::kQ5_1:
+      return WeightType::kQ5_1;
+    case GgmlType::kQ4_K:
+      return WeightType::kQ4_K;
+    case GgmlType::kQ5_K:
+      return WeightType::kQ5_K;
+    case GgmlType::kQ6_K:
+      return WeightType::kQ6_K;
+    case GgmlType::kIQ4_NL:
+      return WeightType::kIQ4_NL;
+    case GgmlType::kIQ4_XS:
+      return WeightType::kIQ4_XS;
     default:
       throw std::logic_error("unsupported Flash-Next matrix format");
   }
+}
+
+/// True for the packed formats the small-matrix (SmallGemm) decode path can
+/// read directly. These are always routed through SmallGemm, including at
+/// prefill widths where the unquantized projections use hipBLAS.
+bool IsSmallQuantFormat(GgmlType type) {
+  return type == GgmlType::kQ5_1 || type == GgmlType::kQ4_K ||
+         type == GgmlType::kQ5_K || type == GgmlType::kQ6_K ||
+         type == GgmlType::kIQ4_NL;
 }
 
 // The tier's tiled kernels compute whole column tiles; below this width the
@@ -845,7 +866,7 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
     }
     return true;
   }
-  if (!MatrixRows(n_tokens)) {
+  if (IsSmallQuantFormat(w.type) || !MatrixRows(n_tokens)) {
     SmallGemm(w.data, SmallType(w.type), x, out, n_tokens, w.rows, w.cols,
               stream_);
     return true;
@@ -1000,6 +1021,13 @@ bool Executor::Experts(const DeviceTensor& w, const float* x,
         break;
       case GgmlType::kQ8_0:
         rc = qfn_mmq_q8_0_moe_raw(w.data, x, ids, out, M, K, T, E, U, stream_);
+        break;
+      case GgmlType::kIQ2_S:
+      case GgmlType::kIQ3_XXS:
+      case GgmlType::kIQ3_S:
+      case GgmlType::kIQ4_NL:
+        rc = qfn_mmq_moe_raw(static_cast<int>(w.type), w.data, x, ids, out, M,
+                             K, T, E, U, stream_);
         break;
       default:
         break;
