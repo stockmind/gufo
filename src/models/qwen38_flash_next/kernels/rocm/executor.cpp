@@ -1433,6 +1433,19 @@ bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
     }
     return true;
   }
+  if (IsSmallQuantFormat(w.type) && w.rows <= 4096 && q.data != nullptr) {
+    if (w.cols != q.k) {
+      AssignError(error_msg, "quantized input width mismatch");
+      return false;
+    }
+    if (qfn_mmq_dense_vec(static_cast<int>(w.type), w.data, q.data, out,
+                          static_cast<int>(w.rows), static_cast<int>(q.n),
+                          static_cast<int>(w.cols), stream_) != 0) {
+      AssignError(error_msg, "quantized dense GEMV failed");
+      return false;
+    }
+    return true;
+  }
   return Dense(w, q.x, out, q.n, error_msg);
 }
 
@@ -1557,6 +1570,20 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
     return true;
   }
   if (IsSmallQuantFormat(w.type)) {
+    if (!MatrixRows(n_tokens) && w.rows <= 4096) {
+      Q8Input q;
+      if (!Quantize(x, n_tokens, w.cols, &q, error_msg)) {
+        return false;
+      }
+      if (qfn_mmq_dense_vec(static_cast<int>(w.type), w.data, q.data, out,
+                            static_cast<int>(w.rows),
+                            static_cast<int>(n_tokens),
+                            static_cast<int>(w.cols), stream_) != 0) {
+        AssignError(error_msg, "quantized dense GEMV failed");
+        return false;
+      }
+      return true;
+    }
     if (qfn_mmq_dense(static_cast<int>(w.type), w.data, x, out,
                       static_cast<int>(w.rows), static_cast<int>(n_tokens),
                       static_cast<int>(w.cols), stream_) != 0) {
