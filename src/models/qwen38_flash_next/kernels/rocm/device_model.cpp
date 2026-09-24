@@ -60,18 +60,6 @@ struct Uploaded {
   DeviceLayer mtp;
 };
 
-/// A dense Q6_K tensor and its upload-time F16 alias. The Q6_K bytes stay
-/// resident for decode; the F16 copy feeds the wide-batch WMMA tier.
-struct AliasConversion {
-  void* source;
-  void* destination;
-  std::uint32_t rows;
-  std::uint32_t cols;
-};
-
-constexpr std::uint32_t kAliasMinRows = 2048;
-constexpr std::uint32_t kAliasMaxCols = 6144;
-
 /// Walks the model's tensors in upload order. With `weights` null the walk
 /// only measures: it sums the bytes every allocation would request and does
 /// no device work, so the weight placement can be decided from the tensors.
@@ -79,7 +67,6 @@ struct Uploader {
   hip::WeightUpload& stager;
   const hip::WeightAllocator* weights;
   std::vector<Conversion>& conversions;
-  std::vector<AliasConversion>& aliases;
   std::vector<void*>& allocations;
   std::size_t& bytes;
   std::size_t& max_half_cols;
@@ -219,35 +206,6 @@ struct Uploader {
     d.data = f32;
     d.type = core::GgmlType::kF32;
     return d;
-  }
-
-  // Build the row-major F16 alias of a dense Q6_K matrix. Wide prefill then
-  // runs it on the F16 WMMA tier (Q8-quality throughput) instead of the
-  // dequant-bound MMQ path; decode keeps reading the Q6_K bytes.
-  void AliasF16(const TensorRef& t, DeviceTensor& d) {
-    if (t.empty() || t.type != core::GgmlType::kQ6_K || t.experts != 1 ||
-        t.rows < kAliasMinRows || t.cols > kAliasMaxCols || t.cols % 256 != 0) {
-      return;
-    }
-    const std::size_t count =
-        static_cast<std::size_t>(t.rows) * static_cast<std::size_t>(t.cols);
-    void* half = nullptr;
-    if (Allocate(&half, count * sizeof(std::uint16_t) + kTailMargin) !=
-        hipSuccess) {
-      Fail("dense Q6_K F16 alias allocation failed");
-      return;
-    }
-    if (Measuring()) {
-      return;
-    }
-    allocations.push_back(half);
-    bytes += count * sizeof(std::uint16_t) + kTailMargin;
-    (void)hipMemsetAsync(static_cast<std::uint8_t*>(half) + count * 2, 0,
-                         kTailMargin, nullptr);
-    aliases.push_back({d.data, half, static_cast<std::uint32_t>(t.rows),
-                       static_cast<std::uint32_t>(t.cols)});
-    max_half_cols = std::max<std::size_t>(max_half_cols, t.cols);
-    d.f16 = half;
   }
 
   // GGUF packs [fc_embedding | fc_hidden] across each row. Split on a
@@ -423,9 +381,7 @@ struct Uploader {
       d.ssm_in = Stack({&l.ssm_qkv, &l.ssm_gate});
     } else {
       d.ssm_qkv = Copy(l.ssm_qkv);
-      AliasF16(l.ssm_qkv, d.ssm_qkv);
       d.ssm_gate = Copy(l.ssm_gate);
-      AliasF16(l.ssm_gate, d.ssm_gate);
     }
     d.ssm_conv1d = Copy(l.ssm_conv1d);
     if (l.linear) {
@@ -435,17 +391,14 @@ struct Uploader {
     d.ssm_a = Copy(l.ssm_a);
     d.ssm_norm = Copy(l.ssm_norm);
     d.ssm_out = Copy(l.ssm_out);
-    AliasF16(l.ssm_out, d.ssm_out);
     if (!l.linear && stackable({&l.attn_q, &l.attn_k, &l.attn_v})) {
       d.attn_qkv = Stack({&l.attn_q, &l.attn_k, &l.attn_v});
     } else {
       d.attn_q = Copy(l.attn_q);
-      AliasF16(l.attn_q, d.attn_q);
       d.attn_k = Copy(l.attn_k);
       d.attn_v = Copy(l.attn_v);
     }
     d.attn_out = Copy(l.attn_out);
-    AliasF16(l.attn_out, d.attn_out);
     d.attn_q_norm = Copy(l.attn_q_norm);
     d.attn_k_norm = Copy(l.attn_k_norm);
     d.indexer_q = Copy(l.indexer_q);
@@ -465,9 +418,6 @@ struct Uploader {
     d.shexp_gate = Copy(l.shexp_gate);
     d.shexp_up = Copy(l.shexp_up);
     d.shexp_down = Copy(l.shexp_down);
-    AliasF16(l.shexp_gate, d.shexp_gate);
-    AliasF16(l.shexp_up, d.shexp_up);
-    AliasF16(l.shexp_down, d.shexp_down);
     d.nextn_enorm = Copy(l.nextn_enorm);
     d.nextn_hnorm = Copy(l.nextn_hnorm);
     SplitMtpProjection(l.nextn_eh_proj, d.nextn_fc_embedding,
@@ -570,14 +520,12 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   std::uint64_t measured = 0;
   {
     std::vector<Conversion> conversions;
-    std::vector<AliasConversion> aliases;
     std::vector<void*> allocations;
     std::size_t bytes = 0;
     std::size_t max_half_cols = 1;
     std::size_t max_q8_cols = 32;
-    Uploader measure{*stager, nullptr,       conversions, aliases,
-                     allocations, bytes,     max_half_cols, max_q8_cols,
-                     error_msg};
+    Uploader measure{*stager, nullptr,       conversions, allocations,
+                     bytes,   max_half_cols, max_q8_cols, error_msg};
     (void)measure.Model(w, mtp, shard_count);
     if (!measure.ok) {
       return nullptr;
@@ -586,10 +534,8 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   }
   const hip::WeightAllocator weights(measured);
   std::vector<Conversion> conversions;
-  std::vector<AliasConversion> aliases;
-  Uploader up{*stager,   &weights,          conversions, aliases,
-              m->allocations_, m->bytes_,   m->max_half_cols_, m->max_q8_cols_,
-              error_msg};
+  Uploader up{*stager,   &weights,          conversions,     m->allocations_,
+              m->bytes_, m->max_half_cols_, m->max_q8_cols_, error_msg};
   Uploaded uploaded = up.Model(w, mtp, shard_count);
   if (!up.ok || !stager->Finish(error_msg)) {
     return nullptr;
@@ -609,14 +555,6 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     } else {
       NarrowActivations(static_cast<const float*>(c.source), c.destination,
                         false, c.count, nullptr);
-    }
-  }
-  for (const auto& a : aliases) {
-    if (!DequantQ6KToF16(a.source, a.rows, a.cols, a.destination, nullptr)) {
-      if (error_msg != nullptr) {
-        *error_msg = "dense Q6_K F16 alias failed";
-      }
-      return nullptr;
     }
   }
   const auto status = hipDeviceSynchronize();
