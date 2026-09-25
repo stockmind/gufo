@@ -3048,12 +3048,20 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     constexpr int nrows = warp_size / threads_per_row;
     const int kqsx = threadIdx.x % threads_per_row;
 
+    // Two grid lookups are in flight per thread on gfx1151; the packed IQ2_S
+    // rows are read from DRAM and the grid indirection makes the latency hard
+    // to hide otherwise. Same iteration set and per-row arithmetic.
+#if defined(__gfx1151__)
+#pragma unroll 2
+#else
 #pragma unroll
-    for (int i0 = 0; i0 < mmq_y; i0 += nrows*nwarps) {
-        int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
+#endif
+    for (int i0 = 0; i0 < mmq_y; i0 += nwarps * nrows) {
+        int i = i0 + threadIdx.y*nrows + threadIdx.x/threads_per_row;
 
         if (need_check) {
             i = min(i, i_max);
+
         }
 
         const block_iq4_xs * bxi = (const block_iq4_xs *) x + kbx0 + i*stride;
