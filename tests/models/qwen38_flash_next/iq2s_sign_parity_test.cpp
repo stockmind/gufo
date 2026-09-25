@@ -5,6 +5,7 @@
 // every grid magnitude and every 8-bit sign byte.
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
 
 namespace {
 
