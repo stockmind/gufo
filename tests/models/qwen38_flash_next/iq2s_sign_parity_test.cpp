@@ -47,26 +47,32 @@ int main() {
       // Both nibble halves of the packed sign byte, as the loader splits it.
       const std::uint32_t b0 = (sb & 0x03) | ((sb & 0x0C) >> 2);
       const std::uint32_t b1 = ((sb & 0x30) >> 4) | ((sb & 0xC0) >> 6);
-      for (auto bits : {b0, b1}) {
+      for (int grp = 0; grp < 2; ++grp) {
+        const int shift = grp == 0 ? 0 : 4;
         const std::uint32_t add =
-            (bits * 0x00204081u) & 0x01010101u;
+            ((sb >> (shift + 0)) & 1u) |
+            (((sb >> (shift + 1)) & 1u) << 8) |
+            (((sb >> (shift + 2)) & 1u) << 16) |
+            (((sb >> (shift + 3)) & 1u) << 24);
         const std::uint32_t fast = ApplySignBits(grid, add);
-        // Original: mask the sign bits into byte MSBs, then vsub4.
-        const std::uint32_t mask = bits == b0
-            ? (static_cast<std::uint32_t>(sb & 0x03) << 7) |
-                  (static_cast<std::uint32_t>(sb & 0x0C) << 21)
-            : (static_cast<std::uint32_t>(sb & 0x30) << 3) |
-                  (static_cast<std::uint32_t>(sb & 0xC0) << 17);
+        // Original: mask the group's four sign bits into its byte MSBs, then
+        // vsub4. Group 0 uses bits 0..3, group 1 uses bits 4..7.
+        const std::uint32_t g0 = (static_cast<std::uint32_t>(sb & 0x03) << 7) |
+                                 (static_cast<std::uint32_t>(sb & 0x0C) << 21);
+        const std::uint32_t g1 = (static_cast<std::uint32_t>(sb & 0x30) << 3) |
+                                 (static_cast<std::uint32_t>(sb & 0xC0) << 17);
+        const std::uint32_t mask = grp == 0 ? g0 : g1;
         const std::uint32_t slow =
             Vsub4(Xor(grid, static_cast<std::uint32_t>(Vcmpne4(mask))),
                   static_cast<std::uint32_t>(Vcmpne4(mask)));
         if (fast != slow) {
           ok = false;
-          std::printf("MISMATCH mag=%02x sb=%02x bits=%x fast=%08x slow=%08x\n",
-                      mag, sb, bits, fast, slow);
+          std::printf("MISMATCH mag=%02x sb=%02x grp=%d fast=%08x slow=%08x\n",
+                      mag, sb, grp, fast, slow);
           break;
         }
       }
+      if (!ok) break;
     }
   }
   std::printf(ok ? "IQ2S_SIGN_PARITY_PASS\n" : "IQ2S_SIGN_PARITY_FAIL\n");
