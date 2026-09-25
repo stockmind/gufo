@@ -2806,11 +2806,18 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         for (int l = 0; l < QR2_S; ++l) {
             const int * grid_pos = (const int *)(iq2s_grid + (qs[l] | ((qh << (8-2*l)) & 0x300)));
 
-            const int signs0 = __vcmpne4(((signs_packed_8[l] & 0x03) << 7) | ((signs_packed_8[l] & 0x0C) << 21), 0x00000000);
-            const int signs1 = __vcmpne4(((signs_packed_8[l] & 0x30) << 3) | ((signs_packed_8[l] & 0xC0) << 17), 0x00000000);
-
-            const int grid_l = __vsub4(grid_pos[0] ^ signs0, signs0);
-            const int grid_h = __vsub4(grid_pos[1] ^ signs1, signs1);
+            // Per-byte two's-complement sign application. The grid bytes are
+            // nonzero (0x08/0x19/0x2b), so the carry from +1 cannot leak into
+            // the neighbouring byte and (g ^ 0xFF) + 1 == -g bytewise. This
+            // replaces the vcmpne4 sign-mask pair plus vsub4 with one xors
+            // and one add, matching the grid's signed value exactly.
+            const uint32_t sb = signs_packed_8[l];
+            const int sign_bits0 = (sb & 0x03) | ((sb & 0x0C) >> 2);
+            const int sign_bits1 = ((sb & 0x30) >> 4) | ((sb & 0xC0) >> 6);
+            const uint32_t add0 = (static_cast<uint32_t>(sign_bits0) * 0x00204081u) & 0x01010101u;
+            const uint32_t add1 = (static_cast<uint32_t>(sign_bits1) * 0x00204081u) & 0x01010101u;
+            const int grid_l = static_cast<int>((static_cast<uint32_t>(grid_pos[0]) ^ (add0 * 0xffu)) + add0);
+            const int grid_h = static_cast<int>((static_cast<uint32_t>(grid_pos[1]) ^ (add1 * 0xffu)) + add1);
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
             // One 8-byte LDS store. Left as two scalar stores the compiler
