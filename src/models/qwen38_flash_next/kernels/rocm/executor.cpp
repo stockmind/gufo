@@ -109,13 +109,13 @@ bool DenseVecWanted(GgmlType type, std::uint32_t rows) {
 }
 
 /// True when a large-row Q6_K dense matrix should use the dedicated warp-per-
-/// row GEMV instead of an N<=8 MMQ tile. Only the vocabulary head qualifies:
-/// one logits row over 248320 rows, where the narrowest MMQ tile (16 columns)
-/// computes fifteen dead columns. The mid-size dense (2560-6144 rows) are
-/// cheaper on the existing GEMV/MMQ split, so they keep it.
+/// row GEMV instead of an N<=8 MMQ tile. The output head is the case that
+/// matters: one logits row over 248320 rows, where a 16-wide MMQ tile computes
+/// fifteen dead columns. Bounded to N<=8 so every row's K reduction matches the
+/// small-row GEMV, and to the exactly-divisible 256-multiple K.
 bool DenseQ6KGemvWanted(const DeviceTensor& w, std::uint32_t n_tokens) {
   return w.type == GgmlType::kQ6_K && w.experts == 1 && n_tokens <= 8 &&
-         w.cols % 256 == 0 && w.rows > 65536;
+         w.cols % 256 == 0;
 }
 
 // The tier's tiled kernels compute whole column tiles; below this width the
