@@ -108,6 +108,16 @@ bool DenseVecWanted(GgmlType type, std::uint32_t rows) {
   return rows <= 4096;
 }
 
+/// True when a large-row Q6_K dense matrix should use the dedicated warp-per-
+/// row GEMV instead of an N<=8 MMQ tile. The output head is the case that
+/// matters: one logits row over 248320 rows, where a 16-wide MMQ tile computes
+/// fifteen dead columns. Bounded to N<=8 so every row's K reduction matches the
+/// small-row GEMV, and to the exactly-divisible 256-multiple K.
+bool DenseQ6KGemvWanted(const DeviceTensor& w, std::uint32_t n_tokens) {
+  return w.type == GgmlType::kQ6_K && w.experts == 1 && n_tokens <= 8 &&
+         w.cols % 256 == 0;
+}
+
 // The tier's tiled kernels compute whole column tiles; below this width the
 // matrix-vector kernels read each weight once per row and win outright.
 constexpr std::uint32_t kVecBatch = 8;
@@ -912,7 +922,9 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
     return true;
   }
   if (IsSmallQuantFormat(w.type)) {
-    if (!MatrixRows(n_tokens) && DenseVecWanted(w.type, w.rows)) {
+    if (!MatrixRows(n_tokens) &&
+        (DenseVecWanted(w.type, w.rows) ||
+         DenseQ6KGemvWanted(w, n_tokens))) {
       Q8Input q;
       if (!Quantize(x, n_tokens, w.cols, &q, error_msg)) {
         return false;
