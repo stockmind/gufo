@@ -2808,16 +2808,17 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
 
             // Per-byte two's-complement sign application. The grid bytes are
             // nonzero (0x08/0x19/0x2b), so the carry from +1 cannot leak into
-            // the neighbouring byte and (g ^ 0xFF) + 1 == -g bytewise. This
-            // replaces the vcmpne4 sign-mask pair plus vsub4 with one xors
-            // and one add, matching the grid's signed value exactly.
+            // the neighbouring byte and (g ^ 0xFF) + 1 == -g bytewise. The
+            // sign byte packs the low group's four element flags in bits 0..3
+            // and the high group's in bits 4..7; build 0x01 per negative byte
+            // with shifts, replacing the vcmpne4 pair plus vsub4.
             const uint32_t sb = signs_packed_8[l];
-            const int sign_bits0 = (sb & 0x03) | ((sb & 0x0C) >> 2);
-            const int sign_bits1 = ((sb & 0x30) >> 4) | ((sb & 0xC0) >> 6);
-            const uint32_t add0 = (static_cast<uint32_t>(sign_bits0) * 0x00204081u) & 0x01010101u;
-            const uint32_t add1 = (static_cast<uint32_t>(sign_bits1) * 0x00204081u) & 0x01010101u;
-            const int grid_l = static_cast<int>((static_cast<uint32_t>(grid_pos[0]) ^ (add0 * 0xffu)) + add0);
-            const int grid_h = static_cast<int>((static_cast<uint32_t>(grid_pos[1]) ^ (add1 * 0xffu)) + add1);
+            const uint32_t add_l = ((sb >> 0) & 1u) | (((sb >> 1) & 1u) << 8) |
+                                   (((sb >> 2) & 1u) << 16) | (((sb >> 3) & 1u) << 24);
+            const uint32_t add_h = ((sb >> 4) & 1u) | (((sb >> 5) & 1u) << 8) |
+                                   (((sb >> 6) & 1u) << 16) | (((sb >> 7) & 1u) << 24);
+            const int grid_l = static_cast<int>((static_cast<uint32_t>(grid_pos[0]) ^ (add_l * 0xffu)) + add_l);
+            const int grid_h = static_cast<int>((static_cast<uint32_t>(grid_pos[1]) ^ (add_h * 0xffu)) + add_h);
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
             // One 8-byte LDS store. Left as two scalar stores the compiler
