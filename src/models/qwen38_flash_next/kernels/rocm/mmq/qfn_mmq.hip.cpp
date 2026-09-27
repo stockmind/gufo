@@ -893,8 +893,6 @@ template void mul_mat_q_case<GGML_TYPE_IQ3_S>(
     ggml_backend_hip_context&, const mmq_args&, hipStream_t);
 template void mul_mat_q_case<GGML_TYPE_IQ4_NL>(
     ggml_backend_hip_context&, const mmq_args&, hipStream_t);
-template void mul_mat_q_case<GGML_TYPE_Q6_K>(
-    ggml_backend_hip_context&, const mmq_args&, hipStream_t);
 template void mul_mat_q_case<GGML_TYPE_IQ4_XS>(
     ggml_backend_hip_context&, const mmq_args&, hipStream_t);
 } // namespace qfn_mmq
