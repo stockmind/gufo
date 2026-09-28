@@ -337,13 +337,28 @@ int main(int argc, char** argv) {
   if (argc == 1)
     return 77;
   try {
-    const bool disk_only =
-        argc == 5 && std::string_view(argv[4]) == "--disk-only";
-    const bool append_only =
-        argc == 5 && std::string_view(argv[4]) == "--append-only";
-    Require(argc == 4 || disk_only || append_only,
+    bool disk_only = false;
+    bool append_only = false;
+    std::string mmproj;
+    for (int i = 4; i < argc; ++i) {
+      const std::string_view argument(argv[i]);
+      if (argument == "--disk-only") {
+        disk_only = true;
+      } else if (argument == "--append-only") {
+        append_only = true;
+      } else if (argument == "--mmproj" && i + 1 < argc) {
+        mmproj = argv[++i];
+      } else {
+        Require(false,
+                "usage: qwen_vision_serving_test MODEL DRAFT_OR_DASH "
+                "IMAGE_DIRECTORY [--mmproj SIDECAR] "
+                "[--disk-only|--append-only]");
+      }
+    }
+    Require(argc >= 4,
             "usage: qwen_vision_serving_test MODEL DRAFT_OR_DASH "
-            "IMAGE_DIRECTORY [--disk-only|--append-only]");
+            "IMAGE_DIRECTORY [--mmproj SIDECAR] "
+            "[--disk-only|--append-only]");
     const std::string model_path(argv[1]);
     const std::string draft = std::string_view(argv[2]) == "-" ? "" : argv[2];
     const std::filesystem::path images(argv[3]);
@@ -368,7 +383,20 @@ int main(int argc, char** argv) {
           &error);
       Require(qfn != nullptr && qfn->VisionEncoder() != nullptr, error);
     } else {
-      auto encoder = models::qwen::vision::Encoder::Open(model_path, {}, 5120);
+      const auto architecture =
+          reader->GetMetadataString("general.architecture").value_or("");
+      const auto embedding = reader
+                                 ->GetMetadataUint32(std::string(architecture) +
+                                                     ".embedding_length")
+                                 .value_or(0);
+      const auto plan =
+          models::qwen::vision::PlanVisionSidecar(architecture, embedding);
+      Require(plan.has_value(), "model architecture has no Qwen vision trunk");
+      if (!plan->discover_beside_target)
+        Require(!mmproj.empty(),
+                "this model requires an explicit --mmproj sidecar");
+      auto encoder = models::qwen::vision::Encoder::Open(model_path, mmproj,
+                                                         plan->output_width);
       Require(encoder != nullptr, "missing vision sidecar");
       qwen =
           hip::QwenGpuModel::CreateFromGguf(reader, &error, std::move(encoder));
