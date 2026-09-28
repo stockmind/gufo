@@ -37,6 +37,7 @@
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/hip/mtp.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #endif
 
@@ -442,6 +443,7 @@ public:
   QwenTextRunnerState(
       std::shared_ptr<const hip::QwenGpuModel> model, std::uint32_t max_context,
       std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model,
+      std::shared_ptr<const hip::QwenMtpGpuModel> mtp_model,
       speculative::SpeculativeOptions speculative_options,
       hip::QwenExecutionPolicy execution_policy)
       : model_(std::move(model)) {
@@ -465,6 +467,23 @@ public:
       if (draft_backend == nullptr) {
         throw std::runtime_error("Failed to create DFlash session: " + error);
       }
+      dflash_draft_ = draft_backend.get();
+      draft_backend_ = draft_backend.get();
+      verifier_ = std::make_unique<speculative::SpeculativeVerifier>(
+          *executor_, std::move(draft_backend), speculative_options);
+    } else if (mtp_model != nullptr) {
+      auto draft_backend = hip::QwenMtpGpuDraftBackend::Create(
+          std::move(mtp_model),
+          hip::QwenMtpGpuDraftConfig{
+              .max_context = max_context,
+              .max_draft_tokens = speculative_options.max_draft_tokens,
+              .vision_input = &executor_->VisionInput(),
+          },
+          &error);
+      if (draft_backend == nullptr) {
+        throw std::runtime_error("Failed to create MTP session: " + error);
+      }
+      mtp_draft_ = draft_backend.get();
       draft_backend_ = draft_backend.get();
       verifier_ = std::make_unique<speculative::SpeculativeVerifier>(
           *executor_, std::move(draft_backend), speculative_options);
@@ -495,8 +514,12 @@ public:
       const noexcept override {
     try {
       auto usage = executor_->GetMemoryUsage();
-      if (draft_backend_ != nullptr) {
-        const auto draft = draft_backend_->GetMemoryUsage();
+      if (dflash_draft_ != nullptr) {
+        const auto draft = dflash_draft_->GetMemoryUsage();
+        usage.request_state_bytes += draft.request_state_bytes;
+        usage.temporary_scratch_bytes += draft.temporary_scratch_bytes;
+      } else if (mtp_draft_ != nullptr) {
+        const auto draft = mtp_draft_->GetMemoryUsage();
         usage.request_state_bytes += draft.request_state_bytes;
         usage.temporary_scratch_bytes += draft.temporary_scratch_bytes;
       }
@@ -825,8 +848,10 @@ private:
   std::shared_ptr<const hip::QwenGpuModel> model_;
   std::unique_ptr<hip::QwenGpuExecutor> executor_;
   std::unique_ptr<speculative::SpeculativeVerifier> verifier_;
-  // Owned by verifier_; used only to account the session's draft allocations.
-  hip::QwenDFlashGpuDraftBackend* draft_backend_{nullptr};
+  // Owned by verifier_; used for cancellation and draft memory accounting.
+  speculative::IDraftBackend* draft_backend_{nullptr};
+  hip::QwenDFlashGpuDraftBackend* dflash_draft_{nullptr};
+  hip::QwenMtpGpuDraftBackend* mtp_draft_{nullptr};
   std::vector<TextRunnerToken> sequence_;
   std::size_t position_{0};
   std::optional<TextRunnerToken> frontier_;
@@ -894,16 +919,18 @@ public:
   QwenTextRunner(
       std::shared_ptr<const hip::QwenGpuModel> model, std::uint32_t max_context,
       std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model = nullptr,
+      std::shared_ptr<const hip::QwenMtpGpuModel> mtp_model = nullptr,
       speculative::SpeculativeOptions speculative_options = {},
       std::string artifact_fingerprint = {},
       std::string draft_artifact_fingerprint = {})
       : model_(std::move(model)),
         dflash_model_(std::move(dflash_model)),
+        mtp_model_(std::move(mtp_model)),
         max_context_(max_context),
         speculative_options_(speculative_options),
         execution_policy_(hip::QwenExecutionPolicy::Production()) {
     if (!artifact_fingerprint.empty()) {
-      const bool speculative = dflash_model_ != nullptr;
+      const bool speculative = Speculative();
       persistence_ = TextRunnerPersistenceDescriptor{
           .compatibility_identity = QwenCompatibilityIdentity(
               artifact_fingerprint, draft_artifact_fingerprint, max_context_,
@@ -913,8 +940,15 @@ public:
     }
   }
 
+  [[nodiscard]] bool Speculative() const noexcept {
+    return dflash_model_ != nullptr || mtp_model_ != nullptr;
+  }
+
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
-    const bool speculative_enabled = dflash_model_ != nullptr;
+    const bool speculative_enabled = Speculative();
+    // The MTP draft has no snapshot/persistence support, so continuation
+    // caching stays available for plain and DFlash models only.
+    const bool snapshots = mtp_model_ == nullptr;
     return {
         .model_id = model_->GetConfig().model_name,
         .state_abi = std::string(QwenStateAbi(
@@ -924,8 +958,8 @@ public:
         .capabilities =
             TextRunnerCapabilities{
                 .incremental_prefill = true,
-                .snapshot = true,
-                .fork = true,
+                .snapshot = snapshots,
+                .fork = snapshots,
                 .final_token_advance_required = !speculative_enabled,
                 .incremental_text_is_exact = true,
                 .multi_token_decode = speculative_enabled,
@@ -933,7 +967,7 @@ public:
                     speculative_enabled && MaximumDecodeBatchWidth() > 1,
                 .batched_multi_token_decode_max_width =
                     speculative_enabled ? MaximumDecodeBatchWidth() : 0,
-                .prefix_reuse = true,
+                .prefix_reuse = snapshots,
             },
         .persistence = persistence_,
     };
@@ -949,6 +983,12 @@ public:
       usage.request_state_bytes += draft.request_state_bytes;
       usage.temporary_scratch_bytes += draft.temporary_scratch_bytes;
       resident_weights += dflash_model_->GetPackedWeightBytes();
+    } else if (mtp_model_ != nullptr) {
+      const auto draft = hip::QwenMtpGpuExecutor::EstimateMemoryUsage(
+          *mtp_model_, max_context_);
+      usage.request_state_bytes += draft.request_state_bytes;
+      usage.temporary_scratch_bytes += draft.temporary_scratch_bytes;
+      resident_weights += mtp_model_->GetPackedWeightBytes();
     }
     std::size_t free_bytes = 0;
     std::size_t total_bytes = 0;
@@ -1036,7 +1076,7 @@ public:
 
   [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
     return std::make_unique<QwenTextRunnerState>(
-        model_, max_context_, dflash_model_, speculative_options_,
+        model_, max_context_, dflash_model_, mtp_model_, speculative_options_,
         execution_policy_);
   }
 
@@ -1161,7 +1201,7 @@ public:
 
   [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
       std::span<const TextRunnerDecode> decodes) const override {
-    if (dflash_model_ == nullptr || decodes.size() < 2 ||
+    if (!Speculative() || decodes.size() < 2 ||
         decodes.size() > MaximumDecodeBatchWidth()) {
       return TextModelRunner::DecodeBatch(decodes);
     }
@@ -1202,9 +1242,9 @@ public:
 
   void AdvanceBatch(
       std::span<const TextRunnerAdvance> advances) const override {
-    if (dflash_model_ != nullptr) {
+    if (Speculative()) {
       throw std::logic_error(
-          "Qwen DFlash sessions do not support batch advance");
+          "Qwen speculative sessions do not support batch advance");
     }
     if (advances.size() < 2 || advances.size() > 8) {
       throw std::invalid_argument(
@@ -1495,12 +1535,13 @@ public:
 
 private:
   [[nodiscard]] std::size_t MaximumDecodeBatchWidth() const noexcept {
-    const std::size_t rows_per_session = dflash_model_ != nullptr ? 8 : 1;
+    const std::size_t rows_per_session = Speculative() ? 8 : 1;
     return std::clamp<std::size_t>(max_context_ / rows_per_session, 1, 8);
   }
 
   std::shared_ptr<const hip::QwenGpuModel> model_;
   std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model_;
+  std::shared_ptr<const hip::QwenMtpGpuModel> mtp_model_;
   std::uint32_t max_context_;
   speculative::SpeculativeOptions speculative_options_;
   hip::QwenExecutionPolicy execution_policy_;
@@ -3185,8 +3226,16 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
     SetError(error, "DSpark HTTP decoding requires a DeepSeek model");
     return false;
   }
-  if (speculative_config.backend == TextSpeculativeBackend::kMtp) {
-    SetError(error, "MTP HTTP decoding requires a Qwen Flash-Next model");
+  if (speculative_config.backend == TextSpeculativeBackend::kMtp &&
+      speculative_config.draft_model_path.empty()) {
+    SetError(error, "MTP HTTP decoding requires --mtp-model");
+    return false;
+  }
+  if (speculative_config.backend == TextSpeculativeBackend::kMtp &&
+      speculative_config.min_draft_tokens != 1) {
+    SetError(error,
+             "MTP requires --min-draft-tokens 1; bound drafts with "
+             "--draft-tokens");
     return false;
   }
   if (session_count == 0) {
@@ -3218,7 +3267,12 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
 
   try {
     std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model;
+    std::shared_ptr<const hip::QwenMtpGpuModel> mtp_model;
     speculative::SpeculativeOptions speculative_options;
+    std::string persistence_fingerprint =
+        disk_cache_config.model_artifact_fingerprint;
+    std::string persistence_draft_fingerprint =
+        disk_cache_config.draft_model_artifact_fingerprint;
     if (speculative_config.backend == TextSpeculativeBackend::kDFlash) {
       if (speculative_config.draft_model_path.empty()) {
         SetError(error, "DFlash HTTP decoding requires --dflash-model");
@@ -3266,17 +3320,47 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
       speculative_options.use_batched_verification = true;
       speculative_options.retain_frontier_logits = true;
       speculative_options.enable_adaptive_draft_length = false;
+    } else if (speculative_config.backend == TextSpeculativeBackend::kMtp) {
+      std::string mtp_error;
+      auto mtp_reader_owner = core::GgufReader::OpenFile(
+          speculative_config.draft_model_path, &mtp_error);
+      if (mtp_reader_owner == nullptr) {
+        SetError(error, "Failed to open MTP GGUF: " + mtp_error);
+        return false;
+      }
+      std::shared_ptr<const core::GgufReader> mtp_reader(
+          std::move(mtp_reader_owner));
+      Logger::Info("loader", "event=load_phase phase=draft_weights " +
+                                 Logger::MemoryStatus());
+      mtp_model = hip::QwenMtpGpuModel::Create(std::move(mtp_reader), model,
+                                               &mtp_error);
+      if (mtp_model == nullptr) {
+        SetError(error, "Failed to create MTP model: " + mtp_error);
+        return false;
+      }
+      speculative_options.max_draft_tokens =
+          speculative_config.max_draft_tokens;
+      speculative_options.min_draft_tokens = 1;
+      speculative_options.initial_draft_tokens =
+          speculative_config.max_draft_tokens;
+      speculative_options.use_batched_verification = true;
+      speculative_options.retain_frontier_logits = true;
+      speculative_options.enable_adaptive_draft_length = true;
+      // The MTP draft has no snapshot support; keep continuation caching off.
+      persistence_fingerprint.clear();
+      persistence_draft_fingerprint.clear();
     }
 
     auto new_state = std::make_shared<Impl::State>();
     auto runner = std::make_shared<QwenTextRunner>(
         std::move(model), max_context, std::move(dflash_model),
-        speculative_options, disk_cache_config.model_artifact_fingerprint,
-        disk_cache_config.draft_model_artifact_fingerprint);
+        std::move(mtp_model), speculative_options, persistence_fingerprint,
+        persistence_draft_fingerprint);
     new_state->model_id = runner->Descriptor().model_id;
     new_state->max_context = max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;
-    if (DiskCacheEnabled(disk_cache_config)) {
+    if (DiskCacheEnabled(disk_cache_config) &&
+        speculative_config.backend != TextSpeculativeBackend::kMtp) {
       runner_disk_cache = TextRunnerDiskCacheOptions{
           .directory = std::move(disk_cache_config.directory),
           .capacity_bytes = disk_cache_config.capacity_bytes,

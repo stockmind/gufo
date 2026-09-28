@@ -43,6 +43,14 @@ void ReadMatrixRow(const models::QwenTensorRef& tensor, std::size_t row,
     std::copy_n(source, columns, output);
     return;
   }
+  if (tensor.type == core::GgmlType::kF16) {
+    const std::size_t offset = row * columns;
+    for (std::size_t column = 0; column < columns; ++column) {
+      output[column] = quant::Fp16ToFloat(
+          static_cast<const std::uint16_t*>(tensor.data)[offset + column]);
+    }
+    return;
+  }
   if (tensor.type == core::GgmlType::kBF16) {
     const std::size_t offset = row * columns;
     for (std::size_t column = 0; column < columns; ++column) {
@@ -205,10 +213,21 @@ void PackPrivateWeights(speculative::QwenMtpWeights& weights,
   layer.ffn_norm =
       CopyVectorF32(layer.ffn_norm, hidden, allocations, packed_bytes);
   if (weights.config.IsMoE()) {
+    // The shared MoE decode router GEMV accepts F32/BF16 only, but llama.cpp
+    // emits the Qwen3.6-35B-A3B MTP router gates as F16. Widen just those two
+    // tiny matrices; the routed experts keep their packed quantized form.
+    const auto pack_router = [&](models::QwenTensorRef& tensor,
+                                 std::size_t rows) {
+      tensor =
+          tensor.type == core::GgmlType::kF16
+              ? PackMatrixBf16(tensor, rows, hidden, allocations, packed_bytes)
+              : CopyRawToDevice(tensor, allocations, packed_bytes);
+    };
+    pack_router(layer.ffn_gate_inp, weights.config.expert_count);
+    pack_router(layer.ffn_gate_inp_shexp, 1);
     for (auto* tensor :
-         {&layer.ffn_gate_inp, &layer.ffn_gate_inp_shexp, &layer.ffn_gate_exps,
-          &layer.ffn_up_exps, &layer.ffn_down_exps, &layer.ffn_gate_shexp,
-          &layer.ffn_up_shexp, &layer.ffn_down_shexp}) {
+         {&layer.ffn_gate_exps, &layer.ffn_up_exps, &layer.ffn_down_exps,
+          &layer.ffn_gate_shexp, &layer.ffn_up_shexp, &layer.ffn_down_shexp}) {
       *tensor = CopyRawToDevice(*tensor, allocations, packed_bytes);
     }
     return;
