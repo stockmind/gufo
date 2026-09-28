@@ -65,6 +65,39 @@ std::unique_ptr<QwenMtpGpuExecutor> QwenMtpGpuExecutor::Create(
   }
 }
 
+QwenGpuMemoryUsage QwenMtpGpuExecutor::EstimateMemoryUsage(
+    const QwenMtpGpuModel& model, std::uint32_t max_context) noexcept {
+  const auto& config = model.GetConfig();
+  const std::size_t hidden = config.hidden_size;
+  const std::size_t attention = config.AttentionSize();
+  const std::size_t kv =
+      static_cast<std::size_t>(config.num_key_value_heads) * config.head_dim;
+  const std::size_t total_kv =
+      static_cast<std::size_t>(config.num_key_value_heads) * max_context *
+      config.head_dim;
+  std::size_t bytes = 0;
+  // target_hidden, embedding, hidden, normed, attn_out, ffn_out, feedback.
+  bytes += hidden * sizeof(float) * 7;
+  bytes += 2 * hidden * sizeof(float);     // fusion input
+  bytes += 2 * attention * sizeof(float);  // packed q/gate
+  bytes += attention * sizeof(float) * 3;  // q, gate, context
+  bytes += kv * sizeof(float) * 2;         // k, v
+  bytes += config.IsMoE() ? MoeScratchBytes(config, 1)
+                          : config.intermediate_size * sizeof(float);
+  bytes += config.vocab_size * sizeof(float);     // logits
+  bytes += total_kv * sizeof(float) * 2;          // f32 kv (k and v)
+  bytes += total_kv * sizeof(std::uint16_t) * 2;  // f16 kv (k and v)
+  bytes += detail::DecodeAttentionScratchElements(config.num_attention_heads,
+                                                  config.head_dim) *
+           sizeof(float);
+  bytes += sizeof(std::uint32_t);  // sampled token
+  return {.request_state_bytes = bytes, .temporary_scratch_bytes = 0};
+}
+
+QwenGpuMemoryUsage QwenMtpGpuExecutor::GetMemoryUsage() const noexcept {
+  return EstimateMemoryUsage(*model_, max_context_);
+}
+
 void QwenMtpGpuExecutor::Allocate() {
   const auto& config = model_->GetConfig();
   const std::size_t hidden = config.hidden_size;
