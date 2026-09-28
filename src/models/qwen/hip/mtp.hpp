@@ -94,6 +94,14 @@ public:
   [[nodiscard]] std::span<const float> CopyLastHidden();
   [[nodiscard]] std::span<const float> CopyLastLogits();
 
+  /// Runs one MTP step and returns the host copy of the full vocabulary
+  /// logits, for host-side sampled proposal construction.
+  [[nodiscard]] std::span<const float> ForwardTargetHiddenLogits(
+      tokenization::TokenId input_token, std::span<const float> target_hidden,
+      std::uint32_t position);
+  [[nodiscard]] std::span<const float> ForwardFeedbackLogits(
+      tokenization::TokenId input_token, std::uint32_t position);
+
   [[nodiscard]] std::uint32_t GetNextPosition() const noexcept {
     return next_position_;
   }
@@ -102,6 +110,9 @@ public:
   }
   [[nodiscard]] std::size_t GetHiddenSize() const noexcept {
     return model_->GetConfig().hidden_size;
+  }
+  [[nodiscard]] std::uint32_t GetVocabSize() const noexcept {
+    return model_->GetConfig().vocab_size;
   }
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const noexcept;
   [[nodiscard]] static QwenGpuMemoryUsage EstimateMemoryUsage(
@@ -188,6 +199,13 @@ public:
   [[nodiscard]] speculative::DraftProposal Propose(
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t current_pos, std::uint32_t max_tokens) override;
+  [[nodiscard]] speculative::DraftProposal ProposeSampled(
+      std::span<const tokenization::TokenId> prompt_tokens,
+      std::uint32_t current_pos, std::uint32_t max_tokens, float temperature,
+      std::uint64_t* rng_state) override;
+  [[nodiscard]] bool SupportsSampledProposals() const noexcept override {
+    return true;
+  }
 
   void AcceptFeedback(std::span<const tokenization::TokenId> accepted,
                       tokenization::TokenId correction_token) override;
