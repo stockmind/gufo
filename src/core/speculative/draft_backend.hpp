@@ -184,6 +184,13 @@ public:
     (void)correction_token;
   }
 
+  /// Drops draft state queued for an in-flight proposal after the driver
+  /// rewinds the target to `position`. Backends whose draft state is already
+  /// lazy may ignore it.
+  virtual void DiscardPendingTargetContext(std::uint32_t position) {
+    (void)position;
+  }
+
   /// Exact payload bytes that Snapshot() will allocate at the current
   /// committed boundary.
   [[nodiscard]] virtual std::size_t SnapshotPayloadBytes() const {
