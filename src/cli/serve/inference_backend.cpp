@@ -172,7 +172,7 @@ constexpr std::string_view kDeepSeekStateAbi =
     "deepseek-v4-flash-gfx1151-state-v4";
 constexpr std::array<std::uint8_t, 8> kQwenPersistentSnapshotMagic = {
     'G', 'Q', 'W', 'R', 'U', 'N', '0', '1'};
-constexpr std::uint32_t kQwenPersistentPayloadVersion = 3;
+constexpr std::uint32_t kQwenPersistentPayloadVersion = 4;
 constexpr std::size_t kQwenMaxResumeTokens = 9;
 constexpr std::size_t kQwenPersistentSnapshotHeaderBytes = 112;
 constexpr std::uint32_t kQwenPersistentSpeculativeFlag = 1U << 0U;
@@ -977,9 +977,9 @@ public:
 
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
     const bool speculative_enabled = Speculative();
-    // The MTP draft has no snapshot/persistence support, so continuation
-    // caching stays available for plain and DFlash models only.
-    const bool snapshots = mtp_model_ == nullptr;
+    // All draft backends (plain, DFlash, and MTP) publish snapshot and
+    // persistent continuation state, so prefix reuse is always available.
+    const bool snapshots = true;
     return {
         .model_id = model_->GetConfig().model_name,
         .state_abi = std::string(QwenStateAbi(
@@ -1384,7 +1384,7 @@ public:
       const TextRunnerSnapshot& snapshot) const override {
     const auto* qwen_snapshot =
         dynamic_cast<const QwenTextRunnerSnapshot*>(&snapshot);
-    const bool speculative = dflash_model_ != nullptr;
+    const bool speculative = Speculative();
     if (qwen_snapshot == nullptr ||
         qwen_snapshot->model.get() != model_.get() ||
         qwen_snapshot->snapshot == nullptr ||
