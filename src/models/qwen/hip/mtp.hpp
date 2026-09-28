@@ -103,6 +103,9 @@ public:
   [[nodiscard]] std::size_t GetHiddenSize() const noexcept {
     return model_->GetConfig().hidden_size;
   }
+  [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const noexcept;
+  [[nodiscard]] static QwenGpuMemoryUsage EstimateMemoryUsage(
+      const QwenMtpGpuModel& model, std::uint32_t max_context) noexcept;
 
 private:
   QwenMtpGpuExecutor(std::shared_ptr<const QwenMtpGpuModel> model,
@@ -190,7 +193,12 @@ public:
                       tokenization::TokenId correction_token) override;
 
   void UpdateTargetHidden(std::span<const float> hidden) override;
+  void DiscardPendingTargetContext(std::uint32_t position) override;
   void Reset() noexcept override;
+
+  [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const noexcept {
+    return executor_->GetMemoryUsage();
+  }
 
   [[nodiscard]] const std::string& GetLastError() const noexcept {
     return last_error_;
@@ -205,6 +213,7 @@ private:
   std::vector<float> target_hidden_;
   std::vector<float> proposal_target_hidden_;
   std::vector<float> committed_target_hidden_;
+  std::vector<float> last_anchor_hidden_;
   std::vector<tokenization::TokenId> proposed_tokens_;
   tokenization::TokenId proposal_input_{0};
   std::uint32_t proposal_checkpoint_{0};

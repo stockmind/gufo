@@ -136,6 +136,7 @@ speculative::DraftProposal QwenMtpGpuDraftBackend::Propose(
   proposal_checkpoint_ = executor_->GetNextPosition();
   proposal_input_ = prompt_tokens.back();
   proposal_target_hidden_ = target_hidden_;
+  last_anchor_hidden_ = target_hidden_;
   committed_target_hidden_.clear();
   proposed_tokens_.clear();
   proposed_tokens_.reserve(count);
@@ -202,11 +203,32 @@ void QwenMtpGpuDraftBackend::Reset() noexcept {
   proposed_tokens_.clear();
   proposal_target_hidden_.clear();
   committed_target_hidden_.clear();
+  last_anchor_hidden_.clear();
   proposal_input_ = 0;
   proposal_checkpoint_ = 0;
   primed_ = false;
   proposal_active_ = false;
   last_error_.clear();
+}
+
+void QwenMtpGpuDraftBackend::DiscardPendingTargetContext(
+    std::uint32_t position) {
+  if (!primed_)
+    return;
+  // The draft executes eagerly while proposing, so rewind it to the target
+  // frontier and restore the anchor hidden that pairs with `position`.
+  proposal_active_ = false;
+  proposed_tokens_.clear();
+  proposal_target_hidden_.clear();
+  committed_target_hidden_.clear();
+  if (last_anchor_hidden_.size() == target_hidden_.size()) {
+    std::ranges::copy(last_anchor_hidden_, target_hidden_.begin());
+  }
+  if (position == 0)
+    return;
+  const std::uint32_t checkpoint = position - 1;
+  if (checkpoint <= executor_->GetNextPosition())
+    executor_->Rewind(checkpoint);
 }
 
 }  // namespace gufo::hip
