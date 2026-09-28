@@ -358,7 +358,7 @@ public:
   }
   /// The most recent verification has not yet injected these target rows.
   /// Discard them when the target returns to its saved verification frontier.
-  void DiscardPendingTargetContext(std::uint32_t position);
+  void DiscardPendingTargetContext(std::uint32_t position) override;
 
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const noexcept {
     return executor_->GetMemoryUsage();

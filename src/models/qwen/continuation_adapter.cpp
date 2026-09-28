@@ -57,11 +57,13 @@ class ContinuationAdapter::State final : public cache::Slot,
 public:
   State(ContinuationAdapter& adapter, cache::MutationGuard& guard,
         std::unique_ptr<hip::QwenGpuExecutor> executor,
-        std::unique_ptr<hip::QwenDFlashGpuDraftBackend> draft)
+        std::unique_ptr<hip::QwenDFlashGpuDraftBackend> draft,
+        std::unique_ptr<hip::QwenMtpGpuDraftBackend> mtp_draft)
       : adapter(adapter),
         guard(guard),
         executor(std::move(executor)),
-        draft(std::move(draft)) {
+        draft(std::move(draft)),
+        mtp_draft(std::move(mtp_draft)) {
     this->executor->continuation_hooks_ = this;
     this->executor->vision_input_.continuation_hooks_ = this;
     pinned_capture = this->executor->PromptHiddenChargedBytes();
@@ -238,6 +240,7 @@ public:
   cache::MutationGuard& guard;
   std::shared_ptr<hip::QwenGpuExecutor> executor;
   std::unique_ptr<hip::QwenDFlashGpuDraftBackend> draft;
+  std::unique_ptr<hip::QwenMtpGpuDraftBackend> mtp_draft;
   std::size_t pinned_capture{};
   std::uint32_t position{};
   std::optional<std::uint32_t> prefill_position;
@@ -261,10 +264,14 @@ ContinuationAdapter::ContinuationAdapter(
     std::shared_ptr<const hip::QwenGpuModel> model, std::uint32_t context,
     cache::Identity identity, hip::QwenExecutionPolicy policy,
     std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model,
-    hip::QwenDFlashGpuDraftConfig draft_config, cache::ResourceLedger* ledger)
+    hip::QwenDFlashGpuDraftConfig draft_config, cache::ResourceLedger* ledger,
+    std::shared_ptr<const hip::QwenMtpGpuModel> mtp_model,
+    hip::QwenMtpGpuDraftConfig mtp_config)
     : model_(std::move(model)),
       draft_model_(std::move(draft_model)),
       draft_config_(draft_config),
+      mtp_model_(std::move(mtp_model)),
+      mtp_config_(mtp_config),
       ledger_(ledger),
       policy_(policy),
       context_(context),
@@ -349,6 +356,20 @@ hip::QwenDFlashGpuDraftBackend* ContinuationAdapter::GetDraftBackend(
   state.BeforeExecution();
   return state.draft.get();
 }
+hip::QwenMtpGpuDraftBackend* ContinuationAdapter::GetMtpDraftBackend(
+    cache::Slot& slot) {
+  auto& state = As(slot);
+  state.BeforeExecution();
+  return state.mtp_draft.get();
+}
+speculative::IDraftBackend* ContinuationAdapter::GetDraft(cache::Slot& slot) {
+  auto& state = As(slot);
+  state.BeforeExecution();
+  return state.mtp_draft ? static_cast<speculative::IDraftBackend*>(
+                               state.mtp_draft.get())
+                         : static_cast<speculative::IDraftBackend*>(
+                               state.draft.get());
+}
 ContinuationFrontier& ContinuationAdapter::GetFrontier(cache::Slot& slot) {
   auto& state = As(slot);
   state.BeforeExecution();
@@ -387,7 +408,10 @@ void ContinuationAdapter::RollbackPrefill(cache::Slot& slot) {
   FinishPrefill(slot);
 }
 cache::Capabilities ContinuationAdapter::GetCapabilities() const {
-  return {.continuation = true, .persistent_encoding = true};
+  // The MTP draft keeps its own snapshot; the adapter's component layout does
+  // not describe it, so continuation stays off for MTP sessions.
+  const bool continuation = mtp_model_ == nullptr;
+  return {.continuation = continuation, .persistent_encoding = continuation};
 }
 std::span<const cache::ComponentDescriptor> ContinuationAdapter::Components()
     const {
@@ -413,8 +437,20 @@ std::unique_ptr<cache::Slot> ContinuationAdapter::CreateSlot(
     executor->ReservePromptHiddenCapture(draft->TargetHiddenLayerIds().size(),
                                          ledger_);
   }
+  std::unique_ptr<hip::QwenMtpGpuDraftBackend> mtp_draft;
+  if (mtp_model_) {
+    std::string error;
+    auto config = mtp_config_;
+    config.vision_input = &executor->VisionInput();
+    mtp_draft =
+        hip::QwenMtpGpuDraftBackend::Create(mtp_model_, config, &error);
+    if (!mtp_draft)
+      throw std::runtime_error("cannot create component MTP draft: " + error);
+    executor->ReservePromptHiddenCapture(
+        mtp_draft->TargetHiddenLayerIds().size(), ledger_);
+  }
   return std::make_unique<State>(*this, guard, std::move(executor),
-                                 std::move(draft));
+                                 std::move(draft), std::move(mtp_draft));
 }
 std::vector<cache::ComponentPosition> ContinuationAdapter::Positions(
     const cache::Slot& slot) const {
