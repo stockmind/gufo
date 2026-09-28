@@ -214,6 +214,19 @@ tokenization::TokenId QwenMtpGpuExecutor::ForwardFeedback(
   return Run(input_token, d_feedback_hidden_, position, compute_logits);
 }
 
+std::span<const float> QwenMtpGpuExecutor::ForwardTargetHiddenLogits(
+    tokenization::TokenId input_token, std::span<const float> target_hidden,
+    std::uint32_t position) {
+  (void)ForwardTargetHidden(input_token, target_hidden, position, true);
+  return CopyLastLogits();
+}
+
+std::span<const float> QwenMtpGpuExecutor::ForwardFeedbackLogits(
+    tokenization::TokenId input_token, std::uint32_t position) {
+  (void)ForwardFeedback(input_token, position, true);
+  return CopyLastLogits();
+}
+
 tokenization::TokenId QwenMtpGpuExecutor::Run(tokenization::TokenId input_token,
                                               const float* hidden_input,
                                               std::uint32_t position,
