@@ -60,7 +60,11 @@ RoutedHostState& GetRoutedHostState() {
 }
 
 /// The routed F16 GEMM's decode of an expert tensor, if it has one here:
-/// Q8_0 (whole 64-element blocks) and Q6_K (whole 256-element superblocks).
+/// Q8_0 (whole 64-element blocks), Q6_K and Q4_K (whole 256-element
+/// superblocks). Q4_K experts are the bulk of a UD-Q4_K_XL model, so routing
+/// them here keeps the MoE prefill on the matrix cores instead of the per-slot
+/// warp GEMV fallback (the dense projections already take the native WMMA
+/// route via IsNativeWmmaQuant).
 std::optional<routed::WeightType> RoutedWeightType(core::GgmlType type,
                                                    std::size_t k) {
   if (type == core::GgmlType::kQ8_0 && k % 64 == 0) {
@@ -68,6 +72,9 @@ std::optional<routed::WeightType> RoutedWeightType(core::GgmlType type,
   }
   if (type == core::GgmlType::kQ6_K && k % 256 == 0) {
     return routed::WeightType::kQ6_K;
+  }
+  if (type == core::GgmlType::kQ4_K && k % 256 == 0) {
+    return routed::WeightType::kQ4_K;
   }
   return std::nullopt;
 }
