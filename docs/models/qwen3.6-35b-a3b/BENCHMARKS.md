@@ -97,6 +97,34 @@ Confirms the shared attention/GDN path is unchanged by the MoE work.
 | 2048 | 270.05 ± 0.94 |
 | 8192 | 266.02 ± 0.03 |
 
+## MTP prefill cost (2026-09-29)
+
+The tables above are AR prefill; the MTP decode rows never measured MTP
+*prefill*. Enabling the MTP head makes cold prefill far more expensive because
+`SpeculativeVerifier::Prime` (a) runs the target with per-token hidden-state
+capture and (b) calls the draft backend's `PrimeTargetContext`, which runs the
+MTP layer as one **serial single-token forward per prompt token**. The draft
+prime alone costs about twice the target forward.
+
+Measured through the server (Q4_K, 262144 ctx, `--prefill-chunk 2048`, same
+prompt, only `--speculative mtp` toggled):
+
+| Prompt (tokens) | prefill t/s, no MTP | prefill t/s, MTP |
+| ---: | ---: | ---: |
+| 22,128 | 2218 | 671 |
+| 44,188 | 1914 | 530 |
+
+Split at pp4096 (instrumented `Prime`): target ~1600 ms (~2560 t/s), draft
+prime ~3200 ms (~1280 t/s). Decode at draft depth 6 is *slower* than no MTP
+(52-58 vs 61 t/s) because ~42% acceptance wastes the verification work; at
+draft depth 1 it is faster (69.6 t/s, ~80% acceptance).
+
+**Consequence:** for agentic use, where a new tool result rewrites the prefix
+almost every turn and the continuation cache misses often, the prefill penalty
+is paid repeatedly and MTP is a net loss. MTP stays off for the served 35B; a
+mere chat workload with a stable prefix may prefer `--speculative mtp
+--draft-tokens 1`.
+
 ## Reproduce
 
 ```sh
