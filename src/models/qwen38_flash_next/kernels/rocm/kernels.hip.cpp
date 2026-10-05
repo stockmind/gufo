@@ -5876,7 +5876,7 @@ bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
     return false;
   // Four blocks, one per K rotation class, cover each 512 tokens.
   hipLaunchKernelGGL((DenseF16GEMMKernel<64, 128, 2, 2, 4, 1, false, false,
-                                         false, false, true>),
+                                         false, false, false, true>),
                      dim3(((batch + 511) / 512) * 4, (m + 63) / 64),
                      dim3(kThreads), 0, stream, w,
                      static_cast<const __half*>(x), out, batch, m, k);
