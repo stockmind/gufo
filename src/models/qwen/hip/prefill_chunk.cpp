@@ -73,6 +73,9 @@ std::optional<routed::WeightType> RoutedWeightType(core::GgmlType type,
   if (type == core::GgmlType::kQ6_K && k % 256 == 0) {
     return routed::WeightType::kQ6_K;
   }
+  if (type == core::GgmlType::kQ5_K && k % 256 == 0) {
+    return routed::WeightType::kQ5_K;
+  }
   if (type == core::GgmlType::kQ4_K && k % 256 == 0) {
     return routed::WeightType::kQ4_K;
   }
