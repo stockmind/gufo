@@ -11,6 +11,7 @@
 #include <span>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <vector>
 
 #include "src/core/model_config.hpp"
@@ -110,6 +111,14 @@ public:
     return weight_regions_.size();
   }
   [[nodiscard]] std::size_t GetResidentBytes() const noexcept;
+  /// BF16 prefill duplicate of a Q6_K dense projection, when one was built
+  /// at load. Decode, verification and the draft backends keep reading the
+  /// original rows; only chunked prompt prefill consults this map.
+  [[nodiscard]] const models::QwenTensorRef* FindPrefillCopy(
+      const void* data) const noexcept;
+  [[nodiscard]] std::size_t GetPrefillCopyBytes() const noexcept {
+    return prefill_copy_bytes_;
+  }
 
 private:
   // Keep the mapped GGUF storage alive until every registered region is
@@ -119,6 +128,13 @@ private:
   std::shared_ptr<const tokenization::QwenTokenizer> tokenizer_;
   std::vector<QwenGpuWeightRegion> weight_regions_;
   std::shared_ptr<models::qwen::vision::Encoder> vision_;
+  // Q6_K dense projections widened to BF16 for prefill (hipBLAS matrix
+  // cores instead of the in-loop K-quant dequantizer), keyed by the
+  // original tensor address. Empty for files without Q6_K dense weights.
+  std::vector<void*> prefill_copy_allocations_;
+  std::unordered_map<const void*, models::QwenTensorRef> prefill_copies_;
+  std::size_t prefill_copy_bytes_{0};
+  bool BuildPrefillCopies(std::string* error_msg);
 };
 
 class QwenGpuSnapshot final {

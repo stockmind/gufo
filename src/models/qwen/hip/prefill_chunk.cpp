@@ -434,6 +434,21 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                                  m, k, arena_.stream);
       return;
     }
+    if (w.type == core::GgmlType::kQ6_K) {
+      // BF16 prefill duplicates of Q6_K dense projections (built at load).
+      // Decode, verification and the draft backends keep the original rows.
+      // hipBLASLt matrix cores first, plain hipBLAS fallback.
+      if (const auto* copy = model_->FindPrefillCopy(w.data)) {
+        if (arena_.hipblaslt_gemm != nullptr &&
+            arena_.hipblaslt_gemm->RunBf16(copy->data, bf16_input, output,
+                                           batch_size, m, k, arena_.stream)) {
+          return;
+        }
+        LaunchHipblasGEMMBF16(arena_.hipblas_handle, copy->data, bf16_input,
+                              output, batch_size, m, k, arena_.stream);
+        return;
+      }
+    }
     const auto resolution = models::qwen::ResolveQwenGemmRoute(
         {.type = w.type,
          .batch_size = batch_size,
@@ -532,7 +547,11 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     // opt-c173-norm-quant: when every projection reading a norm is Q8_0 the
     // FP32 normed row and the BF16 staging copy are both dead, so the norm can
     // write the tiled Q8_1 activation directly and skip two round trips.
+    // A live BF16 prefill copy (Q6_K dense widened at load) reads the BF16
+    // staging rows, so any layer holding one keeps both norms materialized.
+    const bool prefill_bf16_copies = model_->GetPrefillCopyBytes() > 0;
     const bool norm_feeds_q8_only =
+        !prefill_bf16_copies &&
         IsFusedRMSNormQuantizeQ8_1Supported(hidden_size) &&
         (layer.is_full_attention
              ? (is_q8(layer.attn_q) && is_q8(layer.attn_k) &&
@@ -544,6 +563,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     // activation, and the flags are exactly the condition that every consumer
     // is Q8_0, so no route can reach them.
     const bool ffn_feeds_q8_only =
+        !prefill_bf16_copies &&
         IsFusedRMSNormQuantizeQ8_1Supported(hidden_size) &&
         is_q8(layer.ffn_gate) && is_q8(layer.ffn_up);
 
@@ -708,7 +728,11 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // activation, so the BF16 staging buffer is dead. Quantizing straight
       // from FP32 drops one launch and one round trip (about 75 MB per layer
       // at batch 2048) and keeps the activation's full precision going into the
-      // Q8_1 codes instead of rounding to BF16 first.
+      // Q8_1 codes instead of rounding to BF16 first. A live BF16 prefill
+      // copy of attn_output reads the BF16 staging rows, so it is
+      // materialized alongside the quantized form in that case.
+      const bool attn_output_copy =
+          model_->FindPrefillCopy(layer.attn_output.data) != nullptr;
       if (half_prefill) {
         LaunchFloatToFp16(arena_.d_ssm_out, arena_.d_scratch_bf16,
                           batch_size * attention_size, arena_.stream);
@@ -716,6 +740,10 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
         LaunchQuantizeActivationQ8_1FromFp32(
             arena_.d_ssm_out, arena_.d_scratch_q8_act, batch_size,
             attention_size, arena_.stream);
+        if (attn_output_copy) {
+          LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
+                                batch_size * attention_size, arena_.stream);
+        }
       } else {
         LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
                               batch_size * attention_size, arena_.stream);
@@ -760,7 +788,13 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
 
       // The row-split recurrence parallelizes independent state rows. Its
       // epilogue emits the activation consumed by ssm_out directly.
-      const bool ssm_epilogue_q8 = reads_q8_act(layer.ssm_out) &&
+      // A live BF16 prefill copy of ssm_out reads the FP32 staging rows, so
+      // the direct epilogue is disabled for it: the recurrence then runs the
+      // in-place FP32 epilogue and both forms are materialized below.
+      const bool ssm_out_copy =
+          model_->FindPrefillCopy(layer.ssm_out.data) != nullptr;
+      const bool ssm_epilogue_q8 = !ssm_out_copy &&
+                                   reads_q8_act(layer.ssm_out) &&
                                    IsFusedSSMEpilogueQuantizeQ8_1Supported(
                                        config.SsmValueSize(), ssm_inner_size);
       const bool ssm_row_split = detail::ShouldUseSsmRowSplitRecurrence(
@@ -798,6 +832,10 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             arena_.GetRecurrentStateStorage());
       }
 
+      // A live BF16 prefill copy of ssm_out reads the BF16 staging rows,
+      // so they are materialized alongside (never instead of) whatever the
+      // quantized route needs. The epilogue above is already disabled for a
+      // copy, so d_ssm_out is always fresh here.
       if (half_prefill) {
         if (!ssm_row_split) {
           LaunchFloatToFp16(arena_.d_ssm_out, arena_.d_scratch_bf16,
@@ -809,6 +847,10 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
         LaunchQuantizeActivationQ8_1FromFp32(
             arena_.d_ssm_out, arena_.d_scratch_q8_act, batch_size,
             ssm_inner_size, arena_.stream);
+        if (ssm_out_copy) {
+          LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
+                                batch_size * ssm_inner_size, arena_.stream);
+        }
       } else {
         LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
                               batch_size * ssm_inner_size, arena_.stream);
