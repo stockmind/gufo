@@ -4,15 +4,18 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
 
 #include "qfn_mmq.h"
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
@@ -174,6 +177,11 @@ QwenGpuModel::QwenGpuModel(
       vision_(std::move(vision)) {}
 
 QwenGpuModel::~QwenGpuModel() {
+  for (void* allocation : prefill_copy_allocations_) {
+    if (allocation != nullptr) {
+      (void)hipFree(allocation);
+    }
+  }
   ReleaseWeightRegions(weight_regions_);
 }
 
@@ -185,7 +193,132 @@ std::size_t QwenGpuModel::GetResidentBytes() const noexcept {
     }
     total += region.size;
   }
-  return total;
+  if (prefill_copy_bytes_ >
+      std::numeric_limits<std::size_t>::max() - total) {
+    return std::numeric_limits<std::size_t>::max();
+  }
+  return total + prefill_copy_bytes_;
+}
+
+const models::QwenTensorRef* QwenGpuModel::FindPrefillCopy(
+    const void* data) const noexcept {
+  const auto found = prefill_copies_.find(data);
+  return found == prefill_copies_.end() ? nullptr : &found->second;
+}
+
+bool QwenGpuModel::BuildPrefillCopies(std::string* error_msg) {
+  // Opt-out without rebuilding (benchmarking / debugging).
+  if (const char* disable = std::getenv("GUFO_QWEN_PREFILL_BF16_COPIES");
+      disable != nullptr && std::string_view(disable) == "0") {
+    return true;
+  }
+  // Q6_K dense projections only. MoE routed experts keep packed quantized
+  // storage for the routed GEMM, and the output head plus embeddings run on
+  // decode-only paths where the originals stay optimal.
+  std::vector<models::QwenTensorRef*> candidates;
+  for (auto& layer : weights_.layers) {
+    models::QwenTensorRef* dense[] = {
+        &layer.attn_qkv,     &layer.attn_gate,      &layer.ssm_out,
+        &layer.attn_q,       &layer.attn_k,         &layer.attn_v,
+        &layer.attn_output,  &layer.ffn_gate_shexp, &layer.ffn_up_shexp,
+        &layer.ffn_down_shexp,
+    };
+    for (auto* tensor : dense) {
+      if (tensor->type == core::GgmlType::kQ6_K && !tensor->empty() &&
+          tensor->num_elements % 256 == 0) {
+        candidates.push_back(tensor);
+      }
+    }
+  }
+  if (candidates.empty()) {
+    return true;
+  }
+  if (candidates.empty()) {
+    return true;
+  }
+  std::atomic<std::size_t> next{0};
+  std::atomic<bool> failure{false};
+  std::string first_error;
+  std::mutex mutex;
+  auto convert_one = [&](models::QwenTensorRef* tensor) {
+    const std::size_t elements = tensor->num_elements;
+    const std::size_t dst_bytes = elements * sizeof(std::uint16_t);
+    void* device = nullptr;
+    if (hipMalloc(&device, dst_bytes) != hipSuccess) {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (!failure.exchange(true)) {
+        first_error = "BF16 prefill copy allocation failed";
+      }
+      return;
+    }
+    // Device-side dequant through the established prefill kernel: no host
+    // round trip, no duplicate dequant logic.
+    hipStream_t stream = nullptr;
+    bool ok = hipStreamCreate(&stream) == hipSuccess;
+    if (ok) {
+      LaunchDequantizeToBf16(core::GgmlType::kQ6_K, tensor->data,
+                             static_cast<hip_bfloat16*>(device), elements,
+                             stream);
+      ok = hipStreamSynchronize(stream) == hipSuccess;
+      (void)hipStreamDestroy(stream);
+    }
+    if (!ok) {
+      (void)hipFree(device);
+      std::lock_guard<std::mutex> lock(mutex);
+      if (!failure.exchange(true)) {
+        first_error = "BF16 prefill copy dequant failed";
+      }
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    if (failure.load()) {
+      (void)hipFree(device);
+      return;
+    }
+    prefill_copy_allocations_.push_back(device);
+    prefill_copies_[tensor->data] = models::QwenTensorRef{
+        .data = device,
+        .type = core::GgmlType::kBF16,
+        .num_elements = elements,
+    };
+    prefill_copy_bytes_ += dst_bytes;
+  };
+  {
+    std::vector<std::jthread> workers;
+    const std::size_t worker_count =
+        std::min<std::size_t>(16, candidates.size());
+    for (std::size_t w = 0; w + 1 < worker_count; ++w) {
+      workers.emplace_back([&] {
+        while (!failure.load(std::memory_order_relaxed)) {
+          const auto index = next.fetch_add(1, std::memory_order_relaxed);
+          if (index >= candidates.size()) {
+            break;
+          }
+          convert_one(candidates[index]);
+        }
+      });
+    }
+    while (!failure.load(std::memory_order_relaxed)) {
+      const auto index = next.fetch_add(1, std::memory_order_relaxed);
+      if (index >= candidates.size()) {
+        break;
+      }
+      convert_one(candidates[index]);
+    }
+  }
+  if (failure.load()) {
+    for (void* allocation : prefill_copy_allocations_) {
+      (void)hipFree(allocation);
+    }
+    prefill_copy_allocations_.clear();
+    prefill_copies_.clear();
+    prefill_copy_bytes_ = 0;
+    if (error_msg != nullptr) {
+      *error_msg = std::move(first_error);
+    }
+    return false;
+  }
+  return true;
 }
 
 std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
@@ -260,9 +393,13 @@ std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
 
   std::shared_ptr<const tokenization::QwenTokenizer> shared_tokenizer(
       std::move(tokenizer));
-  return std::make_shared<const QwenGpuModel>(
+  auto model = std::make_shared<QwenGpuModel>(
       std::move(reader), std::move(*weights_opt), std::move(shared_tokenizer),
       std::move(weight_regions), std::move(vision));
+  if (!model->BuildPrefillCopies(error_msg)) {
+    return nullptr;
+  }
+  return model;
 }
 
 std::unique_ptr<QwenGpuExecutor> QwenGpuExecutor::Create(
