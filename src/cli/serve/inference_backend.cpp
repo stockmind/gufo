@@ -443,12 +443,6 @@ public:
                                         draft_backend_->TargetHiddenLayerIds());
     }
   }
-      verifier_ = std::make_unique<speculative::SpeculativeVerifier>(
-          *executor_, *draft_backend_, options);
-      executor_->SetPromptHiddenCapture(true,
-                                        draft_backend_->TargetHiddenLayerIds());
-    }
-  }
 
   void SetCancellationCheck(const CancellationCheck& check) override {
     executor_->SetCancellationCheck(check);
