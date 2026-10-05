@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -16,6 +17,9 @@
 
 #include "qfn_mmq.h"
 #include "src/core/quant/ggml_dequant.hpp"
+#if defined(ENGINE_ENABLE_HIP)
+#include <hip/hip_fp16.h>
+#endif
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
@@ -233,40 +237,61 @@ bool QwenGpuModel::BuildPrefillCopies(std::string* error_msg) {
   if (candidates.empty()) {
     return true;
   }
-  if (candidates.empty()) {
-    return true;
-  }
   std::atomic<std::size_t> next{0};
   std::atomic<bool> failure{false};
   std::string first_error;
   std::mutex mutex;
+  // Host-side Q6_K -> Q8_0 requant, one 256-element superblock at a
+  // time so only a small stack staging buffer is needed. Matches the GGUF
+  // block_q8_0 layout ({half d; int8 qs[32]}, amax/127) the prefill W8A8
+  // kernels consume.
+  struct Q80Block {
+    __half d;
+    std::int8_t qs[32];
+  };
+  static_assert(sizeof(Q80Block) == 34, "block_q8_0 must be 34 bytes");
   auto convert_one = [&](models::QwenTensorRef* tensor) {
     const std::size_t elements = tensor->num_elements;
-    const std::size_t dst_bytes = elements * sizeof(std::uint16_t);
+    const std::size_t dst_bytes = (elements / 32) * sizeof(Q80Block);
+    std::vector<Q80Block> host_q8(elements / 32);
+    {
+      float staging[256];
+      const auto* src_blocks =
+          static_cast<const std::uint8_t*>(tensor->data);
+      constexpr std::size_t kQ6KBytes = 210;
+      for (std::size_t s = 0, ns = elements / 256; s < ns; ++s) {
+        ::gufo::quant::DequantizeQ6_K(src_blocks + s * kQ6KBytes, staging,
+                                      256);
+        for (std::size_t b = 0; b < 8; ++b) {
+          float amax = 0.0F;
+          for (std::size_t i = 0; i < 32; ++i) {
+            amax = std::max(amax, std::fabs(staging[b * 32 + i]));
+          }
+          const float d = amax / 127.0F;
+          const float id = d != 0.0F ? 1.0F / d : 0.0F;
+          Q80Block* out = &host_q8[s * 8 + b];
+          out->d = __float2half_rn(d);
+          for (std::size_t i = 0; i < 32; ++i) {
+            out->qs[i] =
+                static_cast<std::int8_t>(std::lrintf(staging[b * 32 + i] * id));
+          }
+        }
+      }
+    }
     void* device = nullptr;
     if (hipMalloc(&device, dst_bytes) != hipSuccess) {
       std::lock_guard<std::mutex> lock(mutex);
       if (!failure.exchange(true)) {
-        first_error = "BF16 prefill copy allocation failed";
+        first_error = "Q8_0 prefill copy allocation failed";
       }
       return;
     }
-    // Device-side dequant through the established prefill kernel: no host
-    // round trip, no duplicate dequant logic.
-    hipStream_t stream = nullptr;
-    bool ok = hipStreamCreate(&stream) == hipSuccess;
-    if (ok) {
-      LaunchDequantizeToBf16(core::GgmlType::kQ6_K, tensor->data,
-                             static_cast<hip_bfloat16*>(device), elements,
-                             stream);
-      ok = hipStreamSynchronize(stream) == hipSuccess;
-      (void)hipStreamDestroy(stream);
-    }
-    if (!ok) {
+    if (hipMemcpy(device, host_q8.data(), dst_bytes, hipMemcpyHostToDevice) !=
+        hipSuccess) {
       (void)hipFree(device);
       std::lock_guard<std::mutex> lock(mutex);
       if (!failure.exchange(true)) {
-        first_error = "BF16 prefill copy dequant failed";
+        first_error = "Q8_0 prefill copy upload failed";
       }
       return;
     }
@@ -278,7 +303,7 @@ bool QwenGpuModel::BuildPrefillCopies(std::string* error_msg) {
     prefill_copy_allocations_.push_back(device);
     prefill_copies_[tensor->data] = models::QwenTensorRef{
         .data = device,
-        .type = core::GgmlType::kBF16,
+        .type = core::GgmlType::kQ8_0,
         .num_elements = elements,
     };
     prefill_copy_bytes_ += dst_bytes;
