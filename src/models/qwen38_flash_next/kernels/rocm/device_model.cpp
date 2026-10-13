@@ -139,7 +139,6 @@ struct Uploader {
     d.experts = static_cast<std::uint32_t>(t.experts);
     return d;
   }
-  }
 
   DeviceTensor Copy(const TensorRef& t) {
     DeviceTensor d;
