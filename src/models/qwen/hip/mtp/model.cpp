@@ -12,6 +12,7 @@
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen/hip/mtp.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
+#include "src/models/qwen/hip/ops/token.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -284,6 +285,14 @@ std::shared_ptr<const QwenMtpGpuModel> QwenMtpGpuModel::Create(
 
   std::vector<void*> allocations;
   std::size_t packed_bytes = 0;
+  // The first greedy verification otherwise resolves the shared argmax
+  // module on the decode path. Preparation launches no trial kernels.
+  if (PrepareBatchedGPUArgmax() != hipSuccess) {
+    if (error_msg != nullptr) {
+      *error_msg = "MTP argmax preparation failed";
+    }
+    return nullptr;
+  }
   const auto start = std::chrono::steady_clock::now();
   try {
     PackPrivateWeights(*weights, allocations, packed_bytes);
