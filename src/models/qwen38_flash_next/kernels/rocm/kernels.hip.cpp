@@ -7815,7 +7815,10 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
 template<WeightType type, unsigned tokens>
 void LaunchSmallGemm(const void* w, const float* x, float* out, std::uint32_t m,
                      std::uint32_t k, hipStream_t stream) {
-  if constexpr (type != WeightType::kQ8_0) {
+  // Only dense F16/BF16/F32 rows are whole-element rows; the quant formats
+  // this fork also routes here keep the block-decoding scalar path.
+  if constexpr (type == WeightType::kF32 || type == WeightType::kF16 ||
+                type == WeightType::kBF16) {
     // Rows of whole four-step passes (K 2560: router and GDN alpha/beta in
     // F16, indexer in BF16) take the unchecked vector loads, four steps at a
     // time at any width: the same products in the same order.
