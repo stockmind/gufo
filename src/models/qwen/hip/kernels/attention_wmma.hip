@@ -712,9 +712,9 @@ void LaunchWmmaAttentionShape(
       const std::size_t query_offset =
           static_cast<std::size_t>(first) * kGqa * kHeadDim;
       PackAttentionHeads<kKvHeads>
-          <<<dim3(heads, (length + 15u) / 16u), block_size, 0, stream>>>(layer_k + first * kHeadDim,
-                                     layer_v + first * kHeadDim, packed_k,
-                                     packed_v, length);
+          <<<dim3(heads, (length + 15u) / 16u), block_size, 0, stream>>>(
+              layer_k + first * kHeadDim, layer_v + first * kHeadDim,
+              packed_k, packed_v, length);
       const dim3 group_grid(grid.x, heads * (kGqa / kWmmaHeads));
       WmmaCausalAttention<kWmmaQueryRows, kWmmaKeys, true, kQueryHeads,
                           kKvHeads>
@@ -724,7 +724,7 @@ void LaunchWmmaAttentionShape(
               lse_out ? lse_out + first * kGqa * batch_size : nullptr,
               key_begin, static_cast<std::uint32_t>(first_query));
     }
-    return true;
+    return;
   }
   WmmaCausalAttention<kWmmaQueryRows, kWmmaKeys, false, kQueryHeads, kKvHeads>
       <<<grid, block_size, 0, stream>>>(
