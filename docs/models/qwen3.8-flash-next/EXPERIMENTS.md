@@ -1,5 +1,36 @@
 # Qwen3.8 Flash-Next experiments
 
+## Decode copies of the large dense projections (October 26, 2026)
+
+Opt-in and not a default: the copies change the output.
+
+| Experiment | Outcome |
+| --- | --- |
+| Decode the large dense projections from a Q4_1/Q5_1 re-encoding of the Q8_0 rows | Opt-in through `GUFO_DECODE_COPY=q4` (or `q5`); `GUFO_DECODE_COPY_CLASSES` narrows the classes (`ssm_in,ssm_out,attn_qkv,shexp` by default, plus `attn_out` and `hc` when named). One `hipMalloc` per copied tensor re-encodes the blocks once at upload and the decode GEMV (`q.n <= 8`) reads the copy; prefill keeps the exact Q8_0 rows, so pp stays on its own path. Q4_1 uses a per-block least-squares step fit, Q5_1 the plain 32-level reference map. |
+
+Measured on gfx1151, fork `69f316a2` plus this change, image
+`localhost/gufo-runtime:iq3xxs`, `gufo bench -p 2048 -n 128 -r 3` greedy, one
+load per arm, unchanged box state (no other model resident):
+
+| Arm | Extra RAM | pp2048 (tok/s) | tg128 AR (tok/s) | tg128 MTP (tok/s) |
+| --- | ---: | ---: | ---: | ---: |
+| exact Q8_0 | - | 1597.16 ± 58.17 | 28.81 ± 0.42 | 38.57 ± 0.61 |
+| Q5_1 copies | 1.90 GiB | 1637.05 ± 79.38 | 31.53 ± 0.47 (+9.4%) | 41.27 ± 0.88 (+7.0%) |
+| Q4_1 copies | 1.58 GiB | 1707.95 ± 22.05 | 33.04 ± 0.68 (+14.7%) | 46.51 ± 0.91 (+20.6%) |
+
+Prefill stayed inside its per-run spread (the copies are only read by calls
+with at most eight rows), so the pp column is not a claimed gain. A greedy
+160-token Python answer diverged between the exact and Q4_1 arms (one
+docstring line and the sort-key expression), so the copies are not
+bit-identical.
+
+The quality cost is not measured here: this repository has no perplexity
+harness for this model. The independent Strix Halo fork that published the
+same recipe reports, on UD-IQ4_XS with 542 teacher-forced decode positions,
++1.32% perplexity and final-token KL 0.019 (code) / 0.048 (document) for this
+class set, against +2.59% when every large matrix is copied. That is the number
+to reproduce before this could become a default.
+
 ## Selector scheduling on newer LLVM (October 23, 2026)
 
 | Experiment | Outcome |

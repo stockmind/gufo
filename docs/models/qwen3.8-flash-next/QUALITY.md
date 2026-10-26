@@ -1,5 +1,17 @@
 # Qwen3.8 Flash-Next quality
 
+## Decode copies (October 26, 2026)
+
+`GUFO_DECODE_COPY=q4` (or `q5`) makes decode read a re-encoded 4- or 5-bit copy
+of `ssm_in`, `ssm_out`, `attn_qkv` and the shared expert instead of the exact
+Q8_0 rows. Prefill is unaffected; a greedy 160-token answer differed from the
+exact arm, so the copies are not bit-identical and stay off unless requested.
+
+Their quality cost was not measured in this repository. See
+[the experiment record](EXPERIMENTS.md#decode-copies-of-the-large-dense-projections-october-26-2026)
+for the measured speed and for the external perplexity and KL figures from the
+fork that published the recipe.
+
 ## Sampled draft-head costs, October 23, 2026
 
 Based on main `41d93463`, including the expanded greedy-head eligibility.

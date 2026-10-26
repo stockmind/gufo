@@ -253,6 +253,14 @@ bool DenseF16GemmQ6K(const void* w, const __half* x, float* out,
                      std::size_t batch, std::size_t m, std::size_t k,
                      hipStream_t stream);
 
+/// Re-encodes `blocks` Q8_0 blocks as Q5_1 (24 bytes each) for the decode GEMV.
+bool RequantQ8_0ToQ5_1(const void* src, void* dst, std::size_t blocks,
+                       hipStream_t stream);
+/// Re-encodes `blocks` Q8_0 blocks as Q4_1 (20 bytes each) for the decode GEMV,
+/// with a per-block least-squares step fit instead of the plain [min, max] map.
+bool RequantQ8_0ToQ4_1(const void* src, void* dst, std::size_t blocks,
+                       hipStream_t stream);
+
 /// SSM Q8_0 projection fused with its four-tap convolution. Supports
 /// [m=16384,k=2560,channels=10240] and at least 1024 tokens. qkvz retains
 /// every Z row plus the QKV rows required for tile boundaries and rolling

@@ -1630,6 +1630,22 @@ bool Executor::Quantize(const float* x, std::uint32_t n_tokens, std::uint32_t k,
 
 bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
                      std::string* error_msg) const {
+  // Decode reads a lossy Q4_1/Q5_1 copy of the large projections; prefill
+  // keeps the exact rows. GUFO_DECODE_COPY selects the copies.
+  if (w.decode_data != nullptr && q.data != nullptr && q.n <= kVecBatch) {
+    if (w.cols != q.k) {
+      AssignError(error_msg, "quantized input width mismatch");
+      return false;
+    }
+    if (qfn_mmq_dense_vec(static_cast<int>(w.decode_type), w.decode_data,
+                          q.data, out, static_cast<int>(w.rows),
+                          static_cast<int>(q.n), static_cast<int>(w.cols),
+                          stream_) != 0) {
+      AssignError(error_msg, "decode copy GEMV failed");
+      return false;
+    }
+    return true;
+  }
   if (w.type == GgmlType::kQ8_0 && q.data != nullptr) {
     if (w.cols != q.k) {
       AssignError(error_msg, "quantized input width mismatch");

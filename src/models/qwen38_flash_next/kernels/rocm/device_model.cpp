@@ -4,6 +4,9 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <initializer_list>
 #include <utility>
 
@@ -519,6 +522,86 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     std::erase(m->allocations_, c.source);
     (void)hipFree(c.source);
     m->bytes_ -= c.count * sizeof(float) + kTailMargin;
+  }
+  // Decode reads each large dense matrix once per round, so its bytes set the
+  // round's cost. GUFO_DECODE_COPY re-encodes four of those matrices, the
+  // shared expert and (q4 only) the hyper-connection mixers to 4 or 5 bits;
+  // prefill keeps the exact Q8_0 rows. The copies change the output, so they
+  // stay off unless asked for. GUFO_DECODE_COPY_CLASSES narrows the set.
+  if (const char* copy_env = std::getenv("GUFO_DECODE_COPY")) {
+    const bool q4_on = std::strcmp(copy_env, "q4") == 0;
+    const bool q5_on = q4_on || std::strcmp(copy_env, "q5") == 0;
+    if (q5_on) {
+      constexpr std::size_t kMinElements = std::size_t{2560} * 6144;
+      constexpr std::size_t kHcElements = std::size_t{320} * 10240;
+      const std::size_t blk_bytes = q4_on ? 20 : 24;
+      const auto dec_type =
+          q4_on ? core::GgmlType::kQ4_1 : core::GgmlType::kQ5_1;
+      const char* classes = std::getenv("GUFO_DECODE_COPY_CLASSES");
+      if (classes == nullptr) {
+        classes = "ssm_in,ssm_out,attn_qkv,shexp";
+      }
+      const auto wants = [&](const char* name) {
+        return std::strstr(classes, name) != nullptr;
+      };
+      std::size_t copied = 0;
+      const auto add = [&](DeviceTensor& t, std::size_t min_elements) {
+        if (t.type != core::GgmlType::kQ8_0 || t.data == nullptr ||
+            t.cols % 32 != 0 ||
+            std::size_t{t.rows} * t.cols < min_elements) {
+          return;
+        }
+        const std::size_t blocks = std::size_t{t.rows} * t.cols / 32;
+        void* copy = nullptr;
+        if (hipMalloc(&copy, blocks * blk_bytes + kTailMargin) != hipSuccess) {
+          return;  // the tensor keeps its exact Q8_0 decode path
+        }
+        m->allocations_.push_back(copy);
+        m->bytes_ += blocks * blk_bytes + kTailMargin;
+        copied += blocks * blk_bytes;
+        const bool done =
+            q4_on ? RequantQ8_0ToQ4_1(t.data, copy, blocks, nullptr)
+                  : RequantQ8_0ToQ5_1(t.data, copy, blocks, nullptr);
+        if (done) {
+          t.decode_data = copy;
+          t.decode_type = dec_type;
+        }
+      };
+      for (auto& l : m->layers_) {
+        if (wants("ssm_in")) {
+          add(l.ssm_in, kMinElements);
+        }
+        if (wants("ssm_out")) {
+          add(l.ssm_out, kMinElements);
+        }
+        if (wants("attn_qkv")) {
+          add(l.attn_qkv, kMinElements);
+        }
+        if (wants("attn_out")) {
+          add(l.attn_out, kMinElements);
+        }
+        if (q4_on && wants("hc")) {
+          for (DeviceMixer* mixer : {&l.hc_attn, &l.hc_ffn}) {
+            add(mixer->down, kHcElements);
+            add(mixer->up, kHcElements);
+          }
+        }
+        if (wants("shexp")) {
+          add(l.shexp_up, 1);
+          add(l.shexp_gate, 1);
+          add(l.shexp_down, 1);
+        }
+      }
+      if (hipDeviceSynchronize() != hipSuccess) {
+        if (error_msg != nullptr) {
+          *error_msg = "decode weight conversion failed";
+        }
+        return nullptr;
+      }
+      std::fprintf(stderr, "decode %s copies: %.2f GiB\n",
+                   q4_on ? "Q4_1" : "Q5_1",
+                   static_cast<double>(copied) / (1024.0 * 1024.0 * 1024.0));
+    }
   }
   return m;
 }
