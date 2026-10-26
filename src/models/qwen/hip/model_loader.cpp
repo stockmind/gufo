@@ -389,14 +389,35 @@ bool QwenGpuModel::BuildPrefillCopies(std::string* error_msg) {
     std::int8_t qs[32];
   };
   static_assert(sizeof(Q80Block) == 34, "block_q8_0 must be 34 bytes");
+  // Remapped tensors point at device-resident weights, so the requant reads
+  // the source bytes through the same GGUF mapping the regions were built
+  // from.
+  const auto host_source = [this](const void* device_pointer) {
+    const auto address = reinterpret_cast<std::uintptr_t>(device_pointer);
+    for (const auto& region : weight_regions_) {
+      const auto base = reinterpret_cast<std::uintptr_t>(region.device_data);
+      if (region.host_data != nullptr && address >= base &&
+          address - base < region.size) {
+        return static_cast<const std::uint8_t*>(region.host_data) +
+               (address - base);
+      }
+    }
+    return static_cast<const std::uint8_t*>(nullptr);
+  };
   auto convert_one = [&](models::QwenTensorRef* tensor) {
     const std::size_t elements = tensor->num_elements;
     const std::size_t dst_bytes = (elements / 32) * sizeof(Q80Block);
     std::vector<Q80Block> host_q8(elements / 32);
     {
       float staging[256];
-      const auto* src_blocks =
-          static_cast<const std::uint8_t*>(tensor->data);
+      const auto* src_blocks = host_source(tensor->data);
+      if (src_blocks == nullptr) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!failure.exchange(true)) {
+          first_error = "Q8_0 prefill copy source mapping not found";
+        }
+        return;
+      }
       constexpr std::size_t kQ6KBytes = 210;
       for (std::size_t s = 0, ns = elements / 256; s < ns; ++s) {
         ::gufo::quant::DequantizeQ6_K(src_blocks + s * kQ6KBytes, staging,
