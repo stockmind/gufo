@@ -106,6 +106,14 @@ public:
   Session& operator=(const Session&) = delete;
 
   [[nodiscard]] bool mtp_enabled() const noexcept { return mtp_enabled_; }
+  /// Frontier of the target residual rows captured by the most recent
+  /// forward, valid only while `dflash_capture_rows()` is nonzero.
+  [[nodiscard]] std::uint32_t dflash_capture_position() const noexcept {
+    return dflash_capture_pos_;
+  }
+  [[nodiscard]] std::uint32_t dflash_capture_rows() const noexcept {
+    return dflash_capture_rows_;
+  }
   [[nodiscard]] std::uint32_t position() const noexcept { return position_; }
   [[nodiscard]] std::uint32_t max_context() const noexcept {
     return max_context_;
@@ -188,6 +196,12 @@ private:
   qwen::vision::DeviceInput vision_input_;
   std::uint32_t max_context_{0};
   bool mtp_enabled_{false};
+  /// An MTP predictor is loaded for this session: the trunk residual and the
+  /// head's own state are kept. A block-diffusion drafter shares the residuals
+  /// without an MTP head, so the two differ.
+  bool mtp_head_{false};
+  std::uint32_t dflash_capture_pos_{0};   ///< first captured residual row
+  std::uint32_t dflash_capture_rows_{0};  ///< captured residual rows
   std::uint32_t index_capacity_{0};  ///< power-of-two raw indexer ring rows
   std::uint32_t position_{0};
   ContinuationHooks* continuation_hooks_{nullptr};
@@ -247,6 +261,12 @@ public:
     /// Largest session context. Zero selects the native context; values
     /// above it require YaRN (Config::MaxContextLength()).
     std::uint32_t max_context{0};
+    /// Last trunk residual rows kept for a block-diffusion drafter. Zero
+    /// disables the capture.
+    std::uint32_t dflash_rows{0};
+    /// Zero-based completed trunk layers whose residual mean is captured, in
+    /// the drafter's feature order.
+    std::vector<std::uint32_t> dflash_layers;
   };
 
   ~Executor();
@@ -771,6 +791,11 @@ private:
   /// is the non-paired F16 GEMM, so prefill builds 48-token tiles instead of
   /// the 64/128-token pair the affine types use.
   mutable bool routed_packed_experts_{false};
+  // Block-diffusion drafter taps: mean residual rows of `dflash_taps_`.
+  float* dflash_capture_{nullptr};
+  std::vector<std::uint32_t> dflash_taps_;
+  std::uint32_t dflash_capture_rows_{0};
+  bool dflash_captures_last_layer_{false};
   mutable std::uint32_t routed_pair_offset_{0};
   mutable std::uint32_t routed_pair_tiles_{0};
   mutable std::uint32_t routed_tile_rows_{48};  ///< token rows per tile

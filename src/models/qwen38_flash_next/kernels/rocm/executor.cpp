@@ -824,7 +824,7 @@ std::unique_ptr<PrefillCheckpoint> Executor::MakePrefillCheckpoint(
   checkpoint->source = &source;
   checkpoint->tokens = prefix;
   checkpoint->hidden_rows =
-      source.mtp_enabled_ ? std::min(prefix, options_.max_speculative) : 0;
+      source.mtp_head_ ? std::min(prefix, options_.max_speculative) : 0;
   checkpoint->logits.resize(c.vocab_size);
   checkpoint->state.reset(new Session);
   auto& view = *checkpoint->state;
@@ -833,13 +833,14 @@ std::unique_ptr<PrefillCheckpoint> Executor::MakePrefillCheckpoint(
   view.index_capacity_ = source.index_capacity_;
   view.position_ = source.position_ + prefix;
   view.mtp_enabled_ = source.mtp_enabled_;
+  view.mtp_head_ = source.mtp_head_;
   view.attention_ = source.attention_;
   view.linear_.resize(source.linear_.size());
   view.blocks_ = c.compress_ratio > 0 && view.position_ > c.indexer_top_k
                      ? view.position_ / c.compress_ratio
                      : source.blocks_;
   view.mtp_ = source.mtp_;
-  if (source.mtp_enabled_) {
+  if (source.mtp_head_) {
     view.mtp_.position = view.position_ - 1;
     view.mtp_.blocks = view.mtp_.position > c.indexer_top_k
                            ? view.mtp_.position / c.compress_ratio
@@ -887,7 +888,7 @@ std::unique_ptr<PrefillCheckpoint> Executor::MakePrefillCheckpoint(
     view.ple_history_ = storage;
     storage += std::size_t{c.PleConvHistory()} * c.HcDim();
   }
-  if (source.mtp_enabled_)
+  if (source.mtp_head_)
     view.mtp_.target_hidden = storage;
   return checkpoint;
 }
@@ -936,6 +937,8 @@ void Session::Reset(bool reuse_mtp) {
   snapshot_lineage_.reset();
   position_ = 0;
   spec_tokens_ = 0;
+  dflash_capture_pos_ = 0;
+  dflash_capture_rows_ = 0;
   ngram_.Reset();
   mtp_.position = 0;
   mtp_.residual_valid = false;
@@ -1030,6 +1033,31 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   e->context_capacity_ = std::max(c.context_length, options.max_context);
   e->yarn_ = MakeYarnRope(c.rope_scaling, c.rotary_dim, c.rope_theta);
   const std::size_t T = e->options_.max_batch;
+  if (!e->options_.dflash_layers.empty()) {
+    if (e->options_.dflash_rows == 0) {
+      AssignError(error_msg, "DFlash capture layers require a row count");
+      return nullptr;
+    }
+    for (const auto il : e->options_.dflash_layers) {
+      if (il >= c.num_layers) {
+        AssignError(error_msg, "DFlash capture layer exceeds the model");
+        return nullptr;
+      }
+    }
+    e->dflash_capture_rows_ = e->options_.dflash_rows;
+    e->dflash_taps_ = e->options_.dflash_layers;
+    e->dflash_captures_last_layer_ =
+        std::find(e->dflash_taps_.begin(), e->dflash_taps_.end(),
+                  c.num_layers - 1) != e->dflash_taps_.end();
+    e->dflash_capture_ =
+        Alloc<float>(e->allocations_,
+                     static_cast<std::size_t>(e->dflash_capture_rows_) *
+                         e->dflash_taps_.size() * c.hidden_size,
+                     error_msg);
+    if (e->dflash_capture_ == nullptr) {
+      return nullptr;
+    }
+  }
   e->blaslt_ = BlasLt::Create(e->stream_, error_msg);
   if (e->blaslt_ == nullptr) {
     return nullptr;
@@ -1258,6 +1286,10 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     s.mtp_embd = s.mixed;
     s.mtp_eproj = s.qkvz;
     s.mtp_res = s.res;
+  }
+  // Greedy verification of a block-diffusion chain also needs the argmax
+  // workspace, even when no MTP predictor is loaded.
+  if (model.has_mtp() || !e->dflash_taps_.empty()) {
     s.mtp_argmax = Alloc<ArgmaxCandidate>(a, kArgmaxParts, error_msg);
     s.mtp_token = Alloc<std::int32_t>(a, 1, error_msg);
     const auto candidate_ids = std::max<std::size_t>(
@@ -1316,7 +1348,8 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
   std::unique_ptr<Session> s(new Session());
   s->owner_ = this;
   s->mtp_enabled_ = mode == core::SessionMode::kSpeculative;
-  if (s->mtp_enabled_ && !has_mtp()) {
+  s->mtp_head_ = s->mtp_enabled_ && has_mtp();
+  if (s->mtp_enabled_ && !s->mtp_head_ && options_.dflash_layers.empty()) {
     AssignError(error_msg, "MTP session requires a loaded predictor");
     return nullptr;
   }
@@ -1368,7 +1401,7 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
     s->ple_history_ = Alloc<float>(a, hist, error_msg, &s->allocated_bytes_);
   }
   s->control_ = Alloc<Session::Control>(a, 1, error_msg, &s->allocated_bytes_);
-  if (s->mtp_enabled_) {
+  if (s->mtp_head_) {
     s->mtp_.target_hidden = Alloc<float>(
         a, static_cast<std::size_t>(options_.max_speculative) * c.HcDim(),
         error_msg, &s->allocated_bytes_);
@@ -3041,7 +3074,7 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
 
 bool Executor::CopyTrunkHidden(const Session& session, std::span<float> hidden,
                                std::string* error_msg) const {
-  if (!session.mtp_enabled_ || session.owner_ != this ||
+  if (!session.mtp_head_ || session.owner_ != this ||
       session.position_ == 0 || hidden.empty() ||
       hidden.size() % config().HcDim() != 0 ||
       hidden.size() / config().HcDim() >
@@ -3330,6 +3363,11 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   }
 
   session.position_ += n;
+  if (dflash_capture_ != nullptr) {
+    const auto rows = std::min(n, dflash_capture_rows_);
+    session.dflash_capture_pos_ = start_pos + n - rows;
+    session.dflash_capture_rows_ = rows;
+  }
   if (sparse) {
     session.blocks_ = complete;
   }
@@ -3392,7 +3430,8 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
     }
     // The last target layer's query outputs have no later cache consumer.
     // Preserve all K/V/indexer rows and the final query's original tile.
-    const bool last_attention = WidePrefill(n) && !session.mtp_enabled_ &&
+    const bool last_attention = WidePrefill(n) && !session.mtp_head_ &&
+                                !dflash_captures_last_layer_ &&
                                 il + 1 == c.num_layers && n_logits == 1 &&
                                 checkpoint == nullptr;
     if (l.linear) {
@@ -3425,7 +3464,8 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
     // Keep aligned tiles and at least 96 rows to retain the wide arithmetic.
     const auto needed =
         std::max({96U, n_logits, checkpoint ? n - checkpoint->tokens + 1 : 0U});
-    const auto skipped = prefill_phase && !session.mtp_enabled_ &&
+    const auto skipped = prefill_phase && !session.mtp_head_ &&
+                         !dflash_captures_last_layer_ &&
                                  il + 1 == c.num_layers && n > needed
                              ? (n - needed) / 128 * 128
                              : 0U;
@@ -3460,6 +3500,21 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
         return false;
     } else if (!finish(n)) {
       return false;
+    }
+    if (dflash_capture_ != nullptr) {
+      const auto tap = std::find(dflash_taps_.begin(), dflash_taps_.end(), il);
+      if (tap != dflash_taps_.end()) {
+        // The drafter reads the mean of this layer's residual streams over the
+        // last `dflash_capture_rows_` rows, which is the window it drafts on.
+        const auto rows = std::min(n, dflash_capture_rows_);
+        const auto tap_offset =
+            static_cast<std::size_t>(tap - dflash_taps_.begin()) *
+            c.hidden_size;
+        MeanStreams(s_.res + static_cast<std::size_t>(n - rows) * c.HcDim(),
+                    dflash_capture_ + tap_offset, rows, c.hidden_size,
+                    c.hc_count, dflash_taps_.size() * c.hidden_size, false,
+                    stream_);
+      }
     }
     normed = next_norm != nullptr;
   }
