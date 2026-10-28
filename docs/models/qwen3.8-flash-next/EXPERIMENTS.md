@@ -1,3 +1,11 @@
+## Packed expert weights on the routed F16 tier (October 28, 2026)
+
+| Experiment | Outcome |
+| --- | --- |
+| Run IQ4_NL / IQ2_S / IQ3_XXS / IQ3_S expert weights through `RoutedF16GEMMKernel` | Retained. The F16 tier now stages one 256-element superblock (or a pair of IQ4_NL blocks) per weight row in shared memory and dequantizes a 32-element group per stage with the same grid/sign tables the CPU reference uses (`IqGroupHalves` mirrors `DequantizeIQ2_S/IQ3_S/IQ3_XXS/IQ4_NL`). Packed types take the non-paired launches, so prefill builds its 128-token gate/up tiles without the paired kernel; `GUFO_F16_IQ=0` restores the MMQ pair path on the same binary. Measured on gfx1151, `gufo bench -p 2048 -n 128 -r 3`, three runs: uncensored UD-IQ3_XXS pp2048 818.90 -> 914.17 (+11.6%), tg128 30.17 -> 30.22; unsloth UD-IQ3_XXS 865.93 -> 904.53 (+4.5%), 31.16 -> 31.25. Greedy 40-token output is byte-identical to the MMQ path on a fixed probe. The affine control (UD-Q4_K_XL) is unchanged at 1736.68 / 29.23. |
+| Re-encode dense projections to Q8_0 at upload (`GUFO_DENSE_Q8`) | Rejected. Prefill 818.95 -> 828.08 (inside the +/-20 spread) while decode fell 30.25 -> 27.87 (-7.9%): Q8_0 dense is two to three times the bytes of the packed formats, so decode pays and prefill gains nothing. |
+| Sticky HIP error reported as a dense-projection failure | Fixed: `qfn_mmq_q8_1_hip` now clears the thread's last error before judging its own launch, and prints type/shape/pool on failure. Third-party dynamic quants that store Q4_K/Q5_K in dense projections used to abort prefill with "quantize failed: invalid argument"; the uncensored UD-IQ3_XXS now prefills at 818.90 tok/s. |
+
 # Qwen3.8 Flash-Next experiments
 
 ## Decode copies of the large dense projections (October 26, 2026)
