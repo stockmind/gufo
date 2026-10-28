@@ -112,7 +112,8 @@ bool F16IqEnabled() {
 /// exist for them (the paired 128-token tile keeps codes in registers).
 bool IsPackedExpertType(GgmlType type) {
   return type == GgmlType::kIQ4_NL || type == GgmlType::kIQ2_S ||
-         type == GgmlType::kIQ3_XXS || type == GgmlType::kIQ3_S;
+         type == GgmlType::kIQ3_XXS || type == GgmlType::kIQ3_S ||
+         type == GgmlType::kIQ3Sn;
 }
 
 bool IsSmallQuantFormat(GgmlType type) {
@@ -2940,6 +2941,8 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
           return WeightType::kIQ3_S;
         case GgmlType::kIQ2_S:
           return WeightType::kIQ2_S;
+        case GgmlType::kIQ3Sn:
+          return WeightType::kIQ3Sn;
         default:
           return WeightType::kQ4_K;
       }

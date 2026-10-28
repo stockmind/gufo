@@ -5308,6 +5308,26 @@ struct IQ3SBlock {
   std::uint8_t signs[32];
   std::uint8_t scales[4];
 };
+/// Strix-native IQ3_XXS: the superblock scale, one precomputed sign mask and
+/// one 4-bit scale per 32-element group, then the group's eight grid indices.
+/// 98 -> 82 bytes per 256 weights, and the decode skips the aux-word unpack
+/// and the 128-entry sign-table read.
+struct IQ3SnBlock {
+  std::uint16_t d;
+  std::uint8_t scales[8];
+  /// Group g, sub-block l: the eight per-element sign bits of that group of
+  /// eight, expanded once at upload.
+  std::uint8_t signs[32];
+  std::uint8_t idx[64];
+};
+static_assert(sizeof(IQ3SnBlock) == 106, "IQ3SnBlock must be 106 bytes");
+
+/// Four sign bytes from four bits: byte j is 0xFF when bit j is set.
+__device__ inline constexpr std::uint32_t kSign4[16] = {
+    0x00000000U, 0x000000FFU, 0x0000FF00U, 0x0000FFFFU, 0x00FF0000U,
+    0x00FF00FFU, 0x00FFFF00U, 0x00FFFFFFU, 0xFF000000U, 0xFF0000FFU,
+    0xFF00FF00U, 0xFF00FFFFU, 0xFFFF0000U, 0xFFFF00FFU, 0xFFFFFF00U,
+    0xFFFFFFFFU};
 static_assert(sizeof(IQ4NlBlock) == 18, "block_iq4_nl must be 18 bytes");
 static_assert(sizeof(IQ2SBlock) == 82, "block_iq2_s must be 82 bytes");
 static_assert(sizeof(IQ3XxsBlock) == 98, "block_iq3_xxs must be 98 bytes");
@@ -5327,7 +5347,37 @@ __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
              ? (k / 256) * sizeof(IQ3XxsBlock)
          : kType == WeightType::kIQ3_S
              ? (k / 256) * sizeof(IQ3SBlock)
+         : kType == WeightType::kIQ3Sn
+             ? (k / 256) * sizeof(IQ3SnBlock)
              : (k / 32) * sizeof(Q8_0Block);
+}
+
+/// Bit `s` of each of the four bytes of `w`, packed into bits 0-3.
+__device__ __forceinline__ std::uint32_t GatherBit(std::uint32_t w, int s) {
+  // 0x01020408 moves byte b's bit to bit 24 + b.
+  return (((w >> s) & 0x01010101U) * 0x01020408U) >> 24U;
+}
+
+/// Four packed 5-bit codes: `nib` holds the 4-bit parts one per byte, `bits`
+/// bits j..j+3 of the Q5_1 high-bit word, spread to bit 4 of each byte.
+__device__ __forceinline__ std::uint32_t SpreadHighBits(std::uint32_t bits) {
+  // 0x00204081 = 1 + 2^7 + 2^14 + 2^21: bit b of `bits` lands at 8b, every
+  // cross term falls off the 0x01010101 mask.
+  return (__umul24(bits, 0x00204081U) & 0x01010101U) << 4U;
+}
+
+/// Four halves from four code bytes: 1024 + q as F16, minus `magic` (1024,
+/// or 1152 for a signed byte carried as q + 128), then the affine.
+__device__ __forceinline__ void CodesToHalves(std::uint32_t codes,
+                                              __half2 magic, __half2 scale2,
+                                              __half2 bias2, __half2& lo,
+                                              __half2& hi) {
+  const std::uint32_t p0 =
+      __builtin_amdgcn_perm(codes, kHalfMagic, 0x01050004U);
+  const std::uint32_t p1 =
+      __builtin_amdgcn_perm(codes, kHalfMagic, 0x03070206U);
+  lo = __hfma2(__hadd2(__builtin_bit_cast(__half2, p0), magic), scale2, bias2);
+  hi = __hfma2(__hadd2(__builtin_bit_cast(__half2, p1), magic), scale2, bias2);
 }
 
 /// Thirty-two values of one 32-element group of a packed low-bit block, as
@@ -5411,6 +5461,31 @@ __device__ __forceinline__ void IqGroupHalves(
         }
       }
     }
+  } else if constexpr (kType == WeightType::kIQ3Sn) {
+    const auto* b = reinterpret_cast<const IQ3SnBlock*>(base);
+    const float d = live ? __half2float(__ushort_as_half(b->d)) : 0.0F;
+    const float db = d * (0.5F + static_cast<float>(b->scales[group])) * 0.5F;
+    const __half2 magic = __floats2half2_rn(-1152.0F, -1152.0F);
+    const __half2 scale2 = __floats2half2_rn(db, db);
+    const __half2 zero2 = __floats2half2_rn(0.0F, 0.0F);
+#pragma unroll
+    for (int l = 0; l < 4; ++l) {
+#pragma unroll
+      for (int half = 0; half < 2; ++half) {
+        const std::uint32_t grid =
+            quant_grids::kIq3xxsGrid[b->idx[(group * 8) + (2 * l) + half]];
+        const std::uint32_t mask =
+            kSign4[(b->signs[(group * 4) + l] >> (4 * half)) & 0x0FU];
+        // Two's complement inside each byte: (m ^ 0xFF) + 1 = -m, with the
+        // addend confined to one per byte so no carry crosses a lane.
+        const std::uint32_t signed_word =
+            (grid ^ mask) + (mask & 0x01010101U);
+        // Flipping the sign bit carries a signed byte to q + 128 exactly,
+        // without the cross-byte carry an add would produce.
+        CodesToHalves(signed_word ^ 0x80808080U, magic, scale2, zero2,
+                      h[(l * 4) + (half * 2)], h[(l * 4) + (half * 2) + 1]);
+      }
+    }
   } else {
     const auto* b = reinterpret_cast<const IQ3SBlock*>(base);
     const std::uint8_t scale_byte = b->scales[group / 2];
@@ -5442,34 +5517,6 @@ __device__ __forceinline__ void IqGroupHalves(
       }
     }
   }
-}
-
-/// Bit `s` of each of the four bytes of `w`, packed into bits 0-3.
-__device__ __forceinline__ std::uint32_t GatherBit(std::uint32_t w, int s) {
-  // 0x01020408 moves byte b's bit to bit 24 + b.
-  return (((w >> s) & 0x01010101U) * 0x01020408U) >> 24U;
-}
-
-/// Four packed 5-bit codes: `nib` holds the 4-bit parts one per byte, `bits`
-/// bits j..j+3 of the Q5_1 high-bit word, spread to bit 4 of each byte.
-__device__ __forceinline__ std::uint32_t SpreadHighBits(std::uint32_t bits) {
-  // 0x00204081 = 1 + 2^7 + 2^14 + 2^21: bit b of `bits` lands at 8b, every
-  // cross term falls off the 0x01010101 mask.
-  return (__umul24(bits, 0x00204081U) & 0x01010101U) << 4U;
-}
-
-/// Four halves from four code bytes: 1024 + q as F16, minus `magic` (1024,
-/// or 1152 for a signed byte carried as q + 128), then the affine.
-__device__ __forceinline__ void CodesToHalves(std::uint32_t codes,
-                                              __half2 magic, __half2 scale2,
-                                              __half2 bias2, __half2& lo,
-                                              __half2& hi) {
-  const std::uint32_t p0 =
-      __builtin_amdgcn_perm(codes, kHalfMagic, 0x01050004U);
-  const std::uint32_t p1 =
-      __builtin_amdgcn_perm(codes, kHalfMagic, 0x03070206U);
-  lo = __hfma2(__hadd2(__builtin_bit_cast(__half2, p0), magic), scale2, bias2);
-  hi = __hfma2(__hadd2(__builtin_bit_cast(__half2, p1), magic), scale2, bias2);
 }
 
 template<WeightType kType, int BM, int BN, int BK, bool kPair = false>
@@ -5504,7 +5551,8 @@ __launch_bounds__(256) __global__
   // dequantized in the compute stage, so a weight read is decoded once per
   // tile instead of once per MMQ pass.
   constexpr bool kIQ4 = kType == WeightType::kIQ4_NL;
-  constexpr bool kIQ = kIQ4 || kType == WeightType::kIQ2_S ||
+  constexpr bool kIQ3SN = kType == WeightType::kIQ3Sn;
+  constexpr bool kIQ = kIQ4 || kIQ3SN || kType == WeightType::kIQ2_S ||
                        kType == WeightType::kIQ3_XXS ||
                        kType == WeightType::kIQ3_S;
   constexpr int kIqPerRow = kIQ4   ? 2 * static_cast<int>(sizeof(IQ4NlBlock))
@@ -5514,6 +5562,8 @@ __launch_bounds__(256) __global__
                                 ? static_cast<int>(sizeof(IQ3XxsBlock))
                             : kType == WeightType::kIQ3_S
                                 ? static_cast<int>(sizeof(IQ3SBlock))
+                            : kIQ3SN
+                                ? static_cast<int>(sizeof(IQ3SnBlock))
                                 : 0;
   // 16-byte code chunks per row and stage: Q4_K's nibble pair and Q5_1's
   // two nibble blocks are two, the two byte-code blocks of Q8_0 and Q6_K
@@ -6826,6 +6876,12 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
                          pad_bounds, rows_in, rows_out, swiglu_gate, out,
                          out_half, m, k, nullptr);
       return true;
+    case WeightType::kIQ3Sn:
+      hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kIQ3Sn, kBM, BN, kBK>),
+                         grid, dim3(kThreads), 0, stream, w, x, tiles,
+                         pad_bounds, rows_in, rows_out, swiglu_gate, out,
+                         out_half, m, k, nullptr);
+      return true;
     case WeightType::kQ5_K:
       if constexpr (BN > 48) {
         return false;
@@ -6850,7 +6906,8 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
   const std::size_t block_elems =
       (type == WeightType::kQ4_K || type == WeightType::kQ5_K ||
        type == WeightType::kQ6_K || type == WeightType::kIQ2_S ||
-       type == WeightType::kIQ3_XXS || type == WeightType::kIQ3_S)
+       type == WeightType::kIQ3_XXS || type == WeightType::kIQ3_S ||
+       type == WeightType::kIQ3Sn)
           ? 256
           : (type == WeightType::kIQ4_NL ? 32 : 64);
   if (m == 0 || k == 0 || k % block_elems != 0 || n_tiles == 0 ||

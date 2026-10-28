@@ -43,6 +43,8 @@ enum class GgmlType : std::uint16_t {
   kIQ4_XS = 23,
   kI32 = 26,
   kBF16 = 30,
+  /// Device-only Strix-native repack of IQ3_XXS (not a GGUF type).
+  kIQ3Sn = 200,
 };
 
 [[nodiscard]] constexpr std::string_view ToString(GgmlType type) noexcept {

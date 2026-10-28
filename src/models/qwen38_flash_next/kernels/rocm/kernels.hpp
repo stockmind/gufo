@@ -51,6 +51,11 @@ enum class WeightType : std::uint32_t {
   kIQ2_S = 22,
   kIQ4_XS = 23,
   kBF16 = 30,
+  /// Strix-native repack of an IQ3_XXS expert matrix, written at upload: the
+  /// per-group sign mask and 4-bit scale are precomputed, so the decode is a
+  /// grid lookup plus one packed sign apply instead of an aux-word unpack and
+  /// a 128-entry sign-table read. 82 bytes per 256 weights (IQ3_XXS: 98).
+  kIQ3Sn = 200,
 };
 
 /// res[t][s][hidden] = table[tokens[t]] for every stream s (Q8_0 rows).

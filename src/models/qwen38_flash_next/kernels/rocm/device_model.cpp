@@ -183,6 +183,74 @@ struct Uploader {
     return d;
   }
 
+  /// Uploads an IQ3_XXS expert matrix in the Strix-native repack: the four
+  /// 7-bit sign indices of every 32-element group are expanded once into byte
+  /// masks and the 4-bit scale is unpacked, so the decode drops the aux-word
+  /// shifts and the 128-entry sign-table read. 98 bytes per 256 weights become
+  /// 106, still far under the 144 of Q4_K.
+  DeviceTensor StrixNative(const TensorRef& t) {
+    // Opt-in while the kernel-side parity test is outstanding:
+    // GUFO_IQ3_SN=1 repacks IQ3_XXS experts into the Strix-native form.
+    static const bool enabled = [] {
+      const char* value = std::getenv("GUFO_IQ3_SN");
+      return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    if (!enabled || t.empty() || !ok || t.type != core::GgmlType::kIQ3_XXS ||
+        t.cols % 256 != 0) {
+      return Copy(t);
+    }
+    constexpr std::size_t kSrc = 98;
+    constexpr std::size_t kDst = 106;
+    const std::size_t blocks = t.SizeBytes() / kSrc;
+    const std::size_t size = blocks * kDst;
+    DeviceTensor d;
+    void* ptr = nullptr;
+    if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
+      Fail("device allocation failed for the IQ3 repack");
+      return d;
+    }
+    if (Measuring()) {
+      return d;
+    }
+    std::vector<std::uint8_t> packed(size);
+    const auto* src = static_cast<const std::uint8_t*>(t.data);
+    const std::uint8_t* sign_table = quant::Iq2xsSigns();
+    for (std::size_t b = 0; b < blocks; ++b) {
+      const std::uint8_t* in = src + (b * kSrc);
+      std::uint8_t* out = packed.data() + (b * kDst);
+      out[0] = in[0];
+      out[1] = in[1];
+      for (int g = 0; g < 8; ++g) {
+        const std::uint8_t* aux = in + 2 + 64 + (4 * g);
+        const std::uint32_t word = static_cast<std::uint32_t>(aux[0]) |
+                                   (static_cast<std::uint32_t>(aux[1]) << 8U) |
+                                   (static_cast<std::uint32_t>(aux[2]) << 16U) |
+                                   (static_cast<std::uint32_t>(aux[3]) << 24U);
+        out[2 + g] = static_cast<std::uint8_t>(word >> 28U);
+        for (int l = 0; l < 4; ++l) {
+          out[10 + (g * 4) + l] = sign_table[(word >> (7U * l)) & 127U];
+        }
+      }
+      std::memcpy(out + 42, in + 2, 64);
+    }
+    allocations.push_back(ptr);
+    bytes += size + kTailMargin;
+    if (hipMemcpy(ptr, packed.data(), size, hipMemcpyHostToDevice) !=
+            hipSuccess ||
+        hipMemset(static_cast<std::uint8_t*>(ptr) + size, 0, kTailMargin) !=
+            hipSuccess) {
+      Fail("IQ3 repack upload failed");
+      return d;
+    }
+    d.data = ptr;
+    d.type = core::GgmlType::kIQ3Sn;
+    d.cols = static_cast<std::uint32_t>(t.cols);
+    d.rows = static_cast<std::uint32_t>(t.rows);
+    d.experts = static_cast<std::uint32_t>(t.experts);
+    max_half_cols = std::max<std::size_t>(max_half_cols, t.cols);
+    return d;
+  }
+
   // GGUF packs [fc_embedding | fc_hidden] across each row. Split on a
   // quantization-block boundary without dequantizing or changing any weight.
   void SplitMtpProjection(const TensorRef& t, DeviceTensor& embedding,
@@ -370,9 +438,9 @@ struct Uploader {
     d.ple_norm_conv = Copy(l.ple_norm_conv);
     d.ple_conv1d = Widen(l.ple_conv1d);
     d.router = Stack({&l.router, &l.shexp_gate_inp});
-    d.ffn_gate_exps = Copy(l.ffn_gate_exps);
-    d.ffn_up_exps = Copy(l.ffn_up_exps);
-    d.ffn_down_exps = Copy(l.ffn_down_exps);
+    d.ffn_gate_exps = StrixNative(l.ffn_gate_exps);
+    d.ffn_up_exps = StrixNative(l.ffn_up_exps);
+    d.ffn_down_exps = StrixNative(l.ffn_down_exps);
     d.shexp_gate = Copy(l.shexp_gate);
     d.shexp_up = Copy(l.shexp_up);
     d.shexp_down = Copy(l.shexp_down);
