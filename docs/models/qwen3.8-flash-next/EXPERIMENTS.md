@@ -1,3 +1,26 @@
+## Routed F16 tier parity harness (October 28, 2026)
+
+`tests/models/qwen38_flash_next/routed_gemm_parity_test.cpp` runs one expert's
+gate/up tile through `RoutedF16Gemm` for Q4_K, IQ3_XXS, IQ2_S and IQ4_NL at
+T = 1, 8, 48 and 128 tokens and compares the output against
+`gufo::quant::Dequantize*` row by row, in L2 against the reference norm.
+Tolerance 5e-2 gives room for the tier's F16 activations and accumulation
+against an F32 reference.
+
+| type | T=1 | T=8 | T=48 | T=128 |
+| --- | ---: | ---: | ---: | ---: |
+| Q4_K | 2.8e-4 | 3.0e-4 | 3.2e-4 | BN>48 rejected by design |
+| IQ3_XXS | 2.2e-4 | 2.2e-4 | 2.2e-4 | 2.2e-4 |
+| IQ2_S | 2.2e-4 | 2.1e-4 | 2.2e-4 | 2.2e-4 |
+| IQ4_NL | 2.5e-4 | 2.3e-4 | 2.3e-4 | 2.3e-4 |
+
+So the packed decode inside the kernel is correct at every width, including one
+token: the corruption seen when packed experts took the tier at decode widths
+came from the executor around the launch (the tier's tiling is 48 rows wide, and
+those batches are not graph-captured), not from the dequant. A per-element
+relative error is useless here (random weights cancel), which is why the
+harness compares the tile in L2.
+
 ## Serving profiles and the DFlash2 port (October 28, 2026)
 
 Measured on gfx1151, `gufo bench -p 2048 -n 128 -r 3 --speculative off`, three

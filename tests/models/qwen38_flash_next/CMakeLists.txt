@@ -84,6 +84,11 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(qwen38_flash_next_routed_gemm_bench PRIVATE
     gufo_qwen38_flash_next hip::host)
 
+  add_executable(qwen38_flash_next_routed_gemm_parity_test EXCLUDE_FROM_ALL
+    routed_gemm_parity_test.cpp)
+  target_link_libraries(qwen38_flash_next_routed_gemm_parity_test PRIVATE
+    gufo_qwen38_flash_next gufo_core hip::host)
+
   add_executable(qwen38_flash_next_gpu_probe EXCLUDE_FROM_ALL gpu_probe.cpp
     mtp_audit.cpp)
   target_link_libraries(qwen38_flash_next_gpu_probe PRIVATE
