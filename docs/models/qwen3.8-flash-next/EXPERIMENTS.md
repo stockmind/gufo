@@ -16,6 +16,14 @@ option: 12% more prefill than the MMQ pair path, decoding unchanged. The Q4
 profile stays the speed default; the trade is physical (3-bit codebook decode
 against 4.5-bit affine), not a missing optimization.
 
+The router exposes the IQ3 profile as
+`gufo/orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF:UD-IQ3_XXS` with
+`--sessions 1 --context 262144`: one native-context session holds about the
+same state as two at 131072 (6.3 GB), and the load leaves 46 GB free against
+21 GB for the Q4 profile, which is the point of the option. Live decode on the
+served endpoint is 40.0 tok/s with MTP and decode copies; a cold load takes
+56 s.
+
 | Experiment | Outcome |
 | --- | --- |
 | DFlash2 drafting for Flash-Next (port of the sibling fork) | Partially landed. The drafter taps and target-context rows are ported (`src/models/qwen/hip/dflash/`), and `MeanStreams` (the residual-row mean the drafter reads) now exists in the kernel tier. Remaining: the `mtp_head_` split in `Session`, the capture allocation and `ForwardBodyRange` tap hook in the executor, and the engine-side block-drafting loop plus the CLI gate. Their reference numbers on this class of hardware are 76.5 tok/s MTP against 109.6 with DFlash2 on code prompts. |
