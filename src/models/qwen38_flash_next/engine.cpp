@@ -1159,8 +1159,7 @@ bool Session::PrepareDecode(const DecodeRequest& request,
     }
   }
   if (!MtpEnabled() || width < 2) {
-    if (MtpLoaded() && !defer_head &&
-        !DraftCatchUp(anchor, false, error_msg)) {
+    if (MtpLoaded() && !defer_head && !DraftCatchUp(anchor, false, error_msg)) {
       return false;
     }
     pending->chain = {anchor};
@@ -1414,8 +1413,8 @@ bool Session::FinishDecode(const DecodeRequest& request,
   // A target stop ends the request; it does not classify the remaining
   // proposals as failed predictions.
   if (!DflashCommit(base,
-                    static_cast<std::uint32_t>(std::min<std::size_t>(
-                        keep, tokens_.size() - base)),
+                    static_cast<std::uint32_t>(
+                        std::min<std::size_t>(keep, tokens_.size() - base)),
                     error_msg)) {
     return false;
   }
