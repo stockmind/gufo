@@ -1,3 +1,26 @@
+## Serving profiles and the DFlash2 port (October 28, 2026)
+
+Measured on gfx1151, `gufo bench -p 2048 -n 128 -r 3 --speculative off`, three
+repetitions, one model resident. Sizes are the on-disk artifacts; the
+per-layer embedding table is opened from the file and never uploaded, so the
+resident weight set is about 29 GB smaller than the file.
+
+| profile | size | pp2048 | tg128 | sessions at 262144 |
+| --- | ---: | ---: | ---: | ---: |
+| UD-Q4_K_XL, abliterated (default) | 111 GB | 1737 | 29.2 (33.0 with `GUFO_DECODE_COPY=q4`) | 2 |
+| Uncensored UD-IQ3_XXS | 85 GB | 918 | 30.2 | 4 |
+| Unsloth UD-IQ3_XXS | 82 GB | 904 | 31.2 | 4 |
+
+The packed-expert F16 tier keeps the IQ3 profiles viable as a context/session
+option: 12% more prefill than the MMQ pair path, decoding unchanged. The Q4
+profile stays the speed default; the trade is physical (3-bit codebook decode
+against 4.5-bit affine), not a missing optimization.
+
+| Experiment | Outcome |
+| --- | --- |
+| DFlash2 drafting for Flash-Next (port of the sibling fork) | Partially landed. The drafter taps and target-context rows are ported (`src/models/qwen/hip/dflash/`), and `MeanStreams` (the residual-row mean the drafter reads) now exists in the kernel tier. Remaining: the `mtp_head_` split in `Session`, the capture allocation and `ForwardBodyRange` tap hook in the executor, and the engine-side block-drafting loop plus the CLI gate. Their reference numbers on this class of hardware are 76.5 tok/s MTP against 109.6 with DFlash2 on code prompts. |
+| `GUFO_DENSE_Q8` dense re-encode | Rejected earlier in this file; the routed-tiling and packed-decode findings above bound the remaining IQ3 work. |
+
 ## Routed tiling for the packed tier (October 28, 2026)
 
 | Experiment | Outcome |

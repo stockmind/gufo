@@ -138,6 +138,11 @@ bool HcCombineF16(float* res, const float* block_out, const float* inject,
 void HcApplyDeferred(float* res, const float* block_out, const float* w,
                      std::uint32_t n_tokens, std::uint32_t hidden,
                      hipStream_t stream);
+/// dst[t][d] = mean over the `streams` residual rows of src[t][s][d], reading
+/// F32 or F16 rows. `dst_stride` is the element pitch between output rows.
+void MeanStreams(const void* src, float* dst, std::uint32_t rows,
+                 std::uint32_t hidden, std::uint32_t streams,
+                 std::size_t dst_stride, bool src_half, hipStream_t stream);
 /// HcCombineF16 with the MoE epilogue fused in: the block output is
 /// MoeEpilogueVec4F16's result over `expert_out` ([tokens][used][hidden]
 /// F16 rows), `weights`, the gated shared expert; it is formed in
