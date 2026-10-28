@@ -833,29 +833,120 @@ bool QwenDFlashGpuExecutor::InjectTargetContext(
   return true;
 }
 
+bool QwenDFlashGpuExecutor::InjectTargetContextDevice(
+    const float* target_features, std::uint32_t position,
+    std::uint32_t num_tokens, const DFlashTrace& trace) {
+  const std::size_t width = GetTargetFeaturesSize();
+  if (position + num_tokens <= injected_context_len_) {
+    return true;
+  }
+  if (target_features == nullptr || position < injected_context_len_ ||
+      position > max_context_ || num_tokens > max_context_ - position) {
+    return false;
+  }
+  // The target may have advanced without a single-session capture (batched
+  // decode, restored frontier). Those rows cannot be filled; zero their slots
+  // so lookbacks inside the window read padding instead of stale KV.
+  if (position > injected_context_len_ &&
+      !ZeroTargetContextGap(position, num_tokens)) {
+    return false;
+  }
+  // Only the final attention window is read back, so rows before it may be
+  // skipped, leaving a gap between the recorded frontier and the first chunk.
+  const auto expired =
+      num_tokens > history_capacity_ ? num_tokens - history_capacity_ : 0U;
+  const auto first_chunk =
+      (expired / injection_capacity_) * injection_capacity_;
+  for (std::uint32_t offset = first_chunk; offset < num_tokens;) {
+    const auto count = std::min(injection_capacity_, num_tokens - offset);
+    if (!InjectTargetContextDeviceChunk(
+            target_features + static_cast<std::size_t>(offset) * width,
+            position + offset, count, trace)) {
+      return false;
+    }
+    offset += count;
+  }
+  injected_context_len_ =
+      std::max(injected_context_len_, position + num_tokens);
+  return true;
+}
+
+bool QwenDFlashGpuExecutor::ZeroTargetContextGap(std::uint32_t position,
+                                                 std::uint32_t num_tokens) {
+  // Rows this chunk (and later decode rows) can still attend start at
+  // position + num_tokens - window; earlier gaps are never read.
+  const auto earliest = position + num_tokens >= history_capacity_
+                            ? position + num_tokens - history_capacity_
+                            : 0U;
+  const auto first = std::max(injected_context_len_, earliest);
+  if (first >= position || history_capacity_ == 0) {
+    return true;
+  }
+  const auto& cfg = model_->GetConfig();
+  const std::size_t kv_dim =
+      static_cast<std::size_t>(cfg.num_key_value_heads) * cfg.head_dim;
+  const std::uint32_t count = position - first;
+  const std::uint32_t start = first % history_capacity_;
+  const std::uint32_t head = std::min(count, history_capacity_ - start);
+  const auto zero = [&](float* buffer, std::uint32_t slot,
+                        std::uint32_t slots) {
+    return hipMemsetAsync(
+               buffer + static_cast<std::size_t>(slot) * kv_dim, 0,
+               static_cast<std::size_t>(slots) * kv_dim * sizeof(float),
+               stream_) == hipSuccess;
+  };
+  for (std::size_t layer = 0; layer < d_injected_k_.size(); ++layer) {
+    if (!zero(d_injected_k_[layer], start, head) ||
+        !zero(d_injected_v_[layer], start, head)) {
+      return false;
+    }
+    if (count > head && (!zero(d_injected_k_[layer], 0, count - head) ||
+                         !zero(d_injected_v_[layer], 0, count - head))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool QwenDFlashGpuExecutor::InjectTargetContextChunk(
     std::span<const float> target_features, std::uint32_t position,
     std::uint32_t num_tokens, const DFlashTrace& trace) {
-  const auto& weights = model_->GetWeights();
-  const auto& cfg = model_->GetConfig();
-  const std::size_t hidden_size = cfg.hidden_size;
   const std::size_t enc_in_dim = GetTargetFeaturesSize();
-  const std::size_t kv_dim =
-      static_cast<std::size_t>(cfg.num_key_value_heads) * cfg.head_dim;
-
-  if (target_features.size() != num_tokens * enc_in_dim ||
+  if (target_features.size() !=
+          static_cast<std::size_t>(num_tokens) * enc_in_dim ||
       position + num_tokens > max_context_) {
     return false;
   }
-
-  // Upload target features
-  const std::size_t bytes = target_features.size() * sizeof(float);
-  const auto cpy_err =
-      hipMemcpyAsync(d_target_features_, target_features.data(), bytes,
-                     hipMemcpyHostToDevice, stream_);
+  const auto cpy_err = hipMemcpyAsync(
+      d_target_features_, target_features.data(),
+      target_features.size() * sizeof(float), hipMemcpyHostToDevice, stream_);
   if (cpy_err != hipSuccess) {
     return false;
   }
+  return InjectTargetContextRows(position, num_tokens, trace);
+}
+
+bool QwenDFlashGpuExecutor::InjectTargetContextDeviceChunk(
+    const float* target_features, std::uint32_t position,
+    std::uint32_t num_tokens, const DFlashTrace& trace) {
+  const std::size_t enc_in_dim = GetTargetFeaturesSize();
+  if (target_features == nullptr || num_tokens > injection_capacity_ ||
+      position + num_tokens > max_context_) {
+    return false;
+  }
+  const auto cpy_err = hipMemcpyAsync(
+      d_target_features_, target_features,
+      static_cast<std::size_t>(num_tokens) * enc_in_dim * sizeof(float),
+      hipMemcpyDeviceToDevice, stream_);
+  if (cpy_err != hipSuccess) {
+    return false;
+  }
+  return InjectTargetContextRows(position, num_tokens, trace);
+}
+
+bool QwenDFlashGpuExecutor::InjectTargetContextRows(std::uint32_t position,
+                                                    std::uint32_t num_tokens,
+                                                    const DFlashTrace& trace) {
   // The caller may reuse pinned prompt rows on every return, including when a
   // later operation throws. Keep the existing wait on the successful path.
   struct DrainContextUpload {

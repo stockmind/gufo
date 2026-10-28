@@ -318,6 +318,44 @@ std::shared_ptr<const QwenDFlashGpuModel> QwenDFlashGpuModel::Create(
     }
     return nullptr;
   }
+  const auto& target_config = target_model->GetConfig();
+  const auto& target_weights = target_model->GetWeights();
+  return CreateImpl(std::move(dflash_reader), target_config.hidden_size,
+                    target_config.vocab_size, target_config.num_layers,
+                    target_weights.token_embd, target_weights.output,
+                    std::move(target_model), error_msg);
+}
+
+std::shared_ptr<const QwenDFlashGpuModel> QwenDFlashGpuModel::Create(
+    std::shared_ptr<const core::GgufReader> dflash_reader,
+    std::uint32_t target_hidden_size, std::uint32_t target_vocab_size,
+    std::uint32_t target_num_layers,
+    const models::QwenTensorRef& token_embedding,
+    const models::QwenTensorRef& output, std::string* error_msg) {
+  if (token_embedding.empty() || output.empty()) {
+    if (error_msg != nullptr) {
+      *error_msg = "DFlash target embedding and output head are required";
+    }
+    return nullptr;
+  }
+  return CreateImpl(std::move(dflash_reader), target_hidden_size,
+                    target_vocab_size, target_num_layers, token_embedding,
+                    output, nullptr, error_msg);
+}
+
+std::shared_ptr<const QwenDFlashGpuModel> QwenDFlashGpuModel::CreateImpl(
+    std::shared_ptr<const core::GgufReader> dflash_reader,
+    std::uint32_t target_hidden_size, std::uint32_t target_vocab_size,
+    std::uint32_t target_num_layers,
+    const models::QwenTensorRef& token_embedding,
+    const models::QwenTensorRef& output,
+    std::shared_ptr<const QwenGpuModel> target_model, std::string* error_msg) {
+  if (dflash_reader == nullptr) {
+    if (error_msg != nullptr) {
+      *error_msg = "DFlash reader is required";
+    }
+    return nullptr;
+  }
 
   auto raw_weights =
       speculative::QwenDFlashWeights::LoadFromGguf(*dflash_reader, error_msg);
@@ -325,10 +363,9 @@ std::shared_ptr<const QwenDFlashGpuModel> QwenDFlashGpuModel::Create(
     return nullptr;
   }
 
-  const auto& target_config = target_model->GetConfig();
   const auto& draft_config = raw_weights->config;
-  if (target_config.hidden_size != draft_config.hidden_size ||
-      target_config.vocab_size != draft_config.vocab_size) {
+  if (target_hidden_size != draft_config.hidden_size ||
+      target_vocab_size != draft_config.vocab_size) {
     if (error_msg != nullptr) {
       *error_msg =
           "DFlash-2 target hidden/vocabulary dimensions do not match the "
@@ -337,8 +374,7 @@ std::shared_ptr<const QwenDFlashGpuModel> QwenDFlashGpuModel::Create(
     return nullptr;
   }
   if (raw_weights->dflash_config.target_layer_ids.empty() ||
-      raw_weights->dflash_config.target_layer_ids.back() >=
-          target_config.num_layers) {
+      raw_weights->dflash_config.target_layer_ids.back() >= target_num_layers) {
     if (error_msg != nullptr) {
       *error_msg =
           "DFlash-2 target layer taps exceed the target model layer count";
@@ -356,10 +392,10 @@ std::shared_ptr<const QwenDFlashGpuModel> QwenDFlashGpuModel::Create(
     // Pack all private DFlash matrices and vectors into GPU device memory
     PackDFlashWeights(weights, allocations, packed_bytes);
 
-    // Unconditionally bind GPU device pointers from the target model for tied
-    // weights
-    weights.token_embedding = target_model->GetWeights().token_embd;
-    weights.output = target_model->GetWeights().output;
+    // Bind the target's tied embedding and output head, which the draft does
+    // not carry.
+    weights.token_embedding = token_embedding;
+    weights.output = output;
     if (weights.output.type == core::GgmlType::kBF16 &&
         weights.output.num_elements %
                 quant::QuantizedBlockElements(core::GgmlType::kQ8_0) ==

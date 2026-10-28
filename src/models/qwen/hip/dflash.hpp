@@ -103,6 +103,15 @@ public:
       std::shared_ptr<const QwenGpuModel> target_model,
       std::string* error_msg = nullptr);
 
+  /// Creates a draft bound to a target whose embedding and output head are
+  /// already on the device (no `QwenGpuModel` incarnation required).
+  [[nodiscard]] static std::shared_ptr<const QwenDFlashGpuModel> Create(
+      std::shared_ptr<const core::GgufReader> dflash_reader,
+      std::uint32_t target_hidden_size, std::uint32_t target_vocab_size,
+      std::uint32_t target_num_layers,
+      const models::QwenTensorRef& token_embedding,
+      const models::QwenTensorRef& output, std::string* error_msg = nullptr);
+
   [[nodiscard]] const speculative::QwenDFlashWeights& GetWeights()
       const noexcept {
     return weights_;
@@ -134,6 +143,14 @@ private:
                      std::vector<void*> allocations,
                      std::size_t packed_weight_bytes);
 
+  [[nodiscard]] static std::shared_ptr<const QwenDFlashGpuModel> CreateImpl(
+      std::shared_ptr<const core::GgufReader> dflash_reader,
+      std::uint32_t target_hidden_size, std::uint32_t target_vocab_size,
+      std::uint32_t target_num_layers,
+      const models::QwenTensorRef& token_embedding,
+      const models::QwenTensorRef& output,
+      std::shared_ptr<const QwenGpuModel> target_model, std::string* error_msg);
+
   std::shared_ptr<const core::GgufReader> dflash_reader_;
   std::shared_ptr<const QwenGpuModel> target_model_;
   speculative::QwenDFlashWeights weights_;
@@ -162,6 +179,14 @@ public:
   bool InjectTargetContext(std::span<const float> target_features,
                            std::uint32_t position, std::uint32_t num_tokens,
                            const DFlashTrace& trace = {});
+
+  /// Ingests target features already on the device. Positions may leave a
+  /// gap after the recorded frontier; rows that fall out of the sliding
+  /// window are skipped.
+  bool InjectTargetContextDevice(const float* target_features,
+                                 std::uint32_t position,
+                                 std::uint32_t num_tokens,
+                                 const DFlashTrace& trace = {});
 
   /// Projects committed features together and writes each private cache at
   /// its original absolute positions. Reuses the coordinator's scalar scratch.
@@ -223,6 +248,13 @@ private:
                                 std::uint32_t position,
                                 std::uint32_t num_tokens,
                                 const DFlashTrace& trace);
+  bool InjectTargetContextDeviceChunk(const float* target_features,
+                                      std::uint32_t position,
+                                      std::uint32_t num_tokens,
+                                      const DFlashTrace& trace);
+  bool InjectTargetContextRows(std::uint32_t position, std::uint32_t num_tokens,
+                               const DFlashTrace& trace);
+  bool ZeroTargetContextGap(std::uint32_t position, std::uint32_t num_tokens);
   void Allocate();
   void Free() noexcept;
   [[nodiscard]] static std::size_t BatchScratchBytes(
