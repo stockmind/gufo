@@ -1,3 +1,11 @@
+## Routed tiling for the packed tier (October 28, 2026)
+
+| Experiment | Outcome |
+| --- | --- |
+| Build the routed tiling in `GatedExperts` itself | Retained. The routed F16 tier used `s_.routed_tiles` but only `MoeExperts` called `RouteHints`, so a layer that took the packed tier before any fallback ran read a tiling from an earlier batch (or an empty one). The tier now asks for the hints itself; the call is cached, so the extra call costs one host branch. |
+| Packed expert weights on the routed F16 tier at decode widths | Rejected. The tier is 3.3x slower for one token (tg128 9.27 vs 30.20) because a decode pass reads every expert's weights through a bucket tile, while the MMQ pair path reads them once at full width. Packed types keep the tier for prefill only (`tg128` 30.20, `pp2048` 918.39, output unchanged). |
+| Strix-native repack of IQ3_XXS experts (`GUFO_IQ3_SN`) | Not shipped. The host repack and the dequant math are value-exact (a Python replay over a full 256-weight block matches the reference on all 256 values), but the repacked type only exists as an F16-tier kernel and the decode widths are the rejected route above, so the option is gated off and produces wrong output. It needs SN support in the decode GEMV before it can be used. |
+
 ## Packed expert weights on the routed F16 tier (October 28, 2026)
 
 | Experiment | Outcome |

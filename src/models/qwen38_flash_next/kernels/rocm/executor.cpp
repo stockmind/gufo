@@ -2902,6 +2902,12 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
   // F16 matrix-core GEMM per (expert, row tile).
   const bool wmma_experts = WmmaExperts(l, n_tokens);
   if (wmma_experts) {
+    // The routed tiling (one tile per expert bucket) is built here as well:
+    // the packed formats take this tier at every batch width, including the
+    // widths that never reach MoeExperts, which is the other caller.
+    if (!RouteHints(n_tokens, error_msg)) {
+      return false;
+    }
     RoutedCompact(s_.ids, s_.expert_counts, s_.routed_bounds, s_.routed_cursors,
                   s_.rows_token, s_.rows_slot, n_tokens, used, c.num_experts,
                   stream_);
