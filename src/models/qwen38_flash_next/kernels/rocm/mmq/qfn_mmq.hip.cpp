@@ -134,6 +134,9 @@ int qfn_mmq_dense_impl(
     ggml_hip_pool_alloc<char> src1_q8_1_pool(qfn_pool_for_stream(ctx->device, stream), nbytes_src1_q8_1);
     char *src1_q8_1 = src1_q8_1_pool.get();
 
+    // A sticky error from an earlier unchecked call would otherwise be reported
+    // here as a quantize failure. Clear it so the launch is judged on its own.
+    (void)hipGetLastError();
         quantize_mmq_q8_1_hip(
             X_f32, nullptr, (void *)src1_q8_1,
             type, K, (int64_t)K, 0, 0,
@@ -142,7 +145,12 @@ int qfn_mmq_dense_impl(
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
-        fprintf(stderr, "%s: quantize failed: %s\n", tag, hipGetErrorString(err));
+        fprintf(stderr,
+                "%s: quantize failed: %s (type=%d M=%d N=%d K=%d padded=%lld "
+                "pool=%p bytes=%zu)\n",
+                tag, hipGetErrorString(err), (int)type, M, N, K,
+                (long long)ne10_padded, (void *)src1_q8_1,
+                nbytes_src1_q8_1);
         return -2;
     }
 
