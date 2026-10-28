@@ -219,7 +219,7 @@ __device__ __forceinline__ float RowElement(const void* row, WeightType type,
       const std::uint32_t j = i % 32;
       const std::uint8_t packed = blk[2 + (j % 16)];
       const std::uint32_t code = j < 16 ? (packed & 0x0FU) : (packed >> 4U);
-      return d * static_cast<float>(kIq4NlValues[code]);
+      return d * static_cast<float>(quant_grids::kIq4NlValues[code]);
     }
     case WeightType::kIQ4_XS: {
       const auto* blk = static_cast<const std::uint8_t*>(row) + (i / 256) * 136;
@@ -5283,13 +5283,165 @@ constexpr std::size_t kQ5KBlockBytes = 176;
 /// scales (one per 16 elements), then the F16 superblock scale d.
 constexpr std::size_t kQ6KBlockBytes = 210;
 
+/// Packed low-bit blocks that the routed F16 tier dequantizes per 32-element
+/// group: a non-linear codebook or a grid index with applied signs instead of
+/// the affine (scale, bias) of the K-quants.
+struct IQ4NlBlock {
+  std::uint16_t d;
+  std::uint8_t qs[16];
+};
+struct IQ2SBlock {
+  std::uint16_t d;
+  std::uint8_t qs[64];
+  std::uint8_t qh[8];
+  std::uint8_t scales[8];
+};
+struct IQ3XxsBlock {
+  std::uint16_t d;
+  std::uint8_t qs[64];
+  std::uint8_t scales_and_signs[32];
+};
+struct IQ3SBlock {
+  std::uint16_t d;
+  std::uint8_t qs[64];
+  std::uint8_t qh[8];
+  std::uint8_t signs[32];
+  std::uint8_t scales[4];
+};
+static_assert(sizeof(IQ4NlBlock) == 18, "block_iq4_nl must be 18 bytes");
+static_assert(sizeof(IQ2SBlock) == 82, "block_iq2_s must be 82 bytes");
+static_assert(sizeof(IQ3XxsBlock) == 98, "block_iq3_xxs must be 98 bytes");
+static_assert(sizeof(IQ3SBlock) == 110, "block_iq3_s must be 110 bytes");
+
 template<WeightType kType>
 __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
   return kType == WeightType::kQ4_K   ? (k / 256) * sizeof(Q4KBlock)
          : kType == WeightType::kQ5_K ? (k / 256) * kQ5KBlockBytes
          : kType == WeightType::kQ6_K ? (k / 256) * kQ6KBlockBytes
          : kType == WeightType::kQ5_1 ? (k / 32) * sizeof(Q5_1Block)
-                                      : (k / 32) * sizeof(Q8_0Block);
+         : kType == WeightType::kIQ4_NL
+             ? (k / 32) * sizeof(IQ4NlBlock)
+         : kType == WeightType::kIQ2_S
+             ? (k / 256) * sizeof(IQ2SBlock)
+         : kType == WeightType::kIQ3_XXS
+             ? (k / 256) * sizeof(IQ3XxsBlock)
+         : kType == WeightType::kIQ3_S
+             ? (k / 256) * sizeof(IQ3SBlock)
+             : (k / 32) * sizeof(Q8_0Block);
+}
+
+/// Thirty-two values of one 32-element group of a packed low-bit block, as
+/// halves: elements 0-15 in h[0..7], 16-31 in h[8..15]. Mirrors the CPU
+/// reference dequantizers in src/core/quant/ggml_dequant.cpp, which the
+/// operator tests already qualify. `group` selects the 32-element group inside
+/// a 256-element superblock and is ignored by IQ4_NL, whose block is one
+/// group; `live` clears rows outside the expert's bucket.
+template<WeightType kType>
+__device__ __forceinline__ void IqGroupHalves(
+    const std::uint8_t* __restrict__ base, int group, bool live, __half2* h) {
+  if constexpr (kType == WeightType::kIQ4_NL) {
+    const auto* b = reinterpret_cast<const IQ4NlBlock*>(base);
+    const float d = live ? __half2float(__ushort_as_half(b->d)) : 0.0F;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      const float lo0 =
+          static_cast<float>(quant_grids::kIq4NlValues[b->qs[2 * i] & 0x0F]) * d;
+      const float lo1 = static_cast<float>(
+                            quant_grids::kIq4NlValues[b->qs[(2 * i) + 1] & 0x0F]) *
+                        d;
+      const float hi0 =
+          static_cast<float>(quant_grids::kIq4NlValues[b->qs[2 * i] >> 4U]) * d;
+      const float hi1 = static_cast<float>(
+                            quant_grids::kIq4NlValues[b->qs[(2 * i) + 1] >> 4U]) *
+                        d;
+      h[i] = __floats2half2_rn(lo0, lo1);
+      h[8 + i] = __floats2half2_rn(hi0, hi1);
+    }
+  } else if constexpr (kType == WeightType::kIQ2_S) {
+    const auto* b = reinterpret_cast<const IQ2SBlock*>(base);
+    const float d = live ? __half2float(__ushort_as_half(b->d)) : 0.0F;
+    const std::uint8_t scale_byte = b->scales[group];
+#pragma unroll
+    for (int l = 0; l < 4; ++l) {
+      const int nibble = l < 2 ? (scale_byte & 0x0F) : (scale_byte >> 4U);
+      const float db = d * (0.5F + static_cast<float>(nibble)) * 0.25F;
+      const std::uint32_t index =
+          static_cast<std::uint32_t>(b->qs[(group * 4) + l]) |
+          ((static_cast<std::uint32_t>(b->qh[group]) << (8U - (2U * l))) & 0x300U);
+      const std::uint64_t grid = quant_grids::kIq2sGrid[index];
+      const std::uint8_t signs = b->qs[32 + (group * 4) + l];
+#pragma unroll
+      for (int p = 0; p < 4; ++p) {
+        const int j = 2 * p;
+        const float m0 = static_cast<float>((grid >> (8 * j)) & 0xFFU);
+        const float m1 = static_cast<float>((grid >> (8 * (j + 1))) & 0xFFU);
+        const float v0 = (signs & (1U << j)) != 0 ? -db * m0 : db * m0;
+        const float v1 = (signs & (1U << (j + 1))) != 0 ? -db * m1 : db * m1;
+        h[(l * 4) + p] = __floats2half2_rn(v0, v1);
+      }
+    }
+  } else if constexpr (kType == WeightType::kIQ3_XXS) {
+    const auto* b = reinterpret_cast<const IQ3XxsBlock*>(base);
+    const std::uint32_t aux =
+        static_cast<std::uint32_t>(b->scales_and_signs[4 * group]) |
+        (static_cast<std::uint32_t>(b->scales_and_signs[(4 * group) + 1]) << 8U) |
+        (static_cast<std::uint32_t>(b->scales_and_signs[(4 * group) + 2])
+         << 16U) |
+        (static_cast<std::uint32_t>(b->scales_and_signs[(4 * group) + 3]) << 24U);
+    const float d = live ? __half2float(__ushort_as_half(b->d)) : 0.0F;
+    const float db = d * (0.5F + static_cast<float>(aux >> 28U)) * 0.5F;
+#pragma unroll
+    for (int l = 0; l < 4; ++l) {
+      const std::uint8_t signs =
+          quant_grids::kSignsIq2xs[(aux >> (7U * l)) & 127U];
+#pragma unroll
+      for (int half = 0; half < 2; ++half) {
+        const std::uint32_t grid =
+            quant_grids::kIq3xxsGrid[b->qs[(group * 8) + (2 * l) + half]];
+#pragma unroll
+        for (int p = 0; p < 2; ++p) {
+          const int jj = 2 * p;
+          const float m0 = static_cast<float>((grid >> (8 * jj)) & 0xFFU);
+          const float m1 = static_cast<float>((grid >> (8 * (jj + 1))) & 0xFFU);
+          const int j0 = (half * 4) + jj;
+          const int j1 = j0 + 1;
+          const float v0 = (signs & (1U << j0)) != 0 ? -db * m0 : db * m0;
+          const float v1 = (signs & (1U << j1)) != 0 ? -db * m1 : db * m1;
+          h[(l * 4) + (half * 2) + p] = __floats2half2_rn(v0, v1);
+        }
+      }
+    }
+  } else {
+    const auto* b = reinterpret_cast<const IQ3SBlock*>(base);
+    const std::uint8_t scale_byte = b->scales[group / 2];
+    const int nibble =
+        (group % 2) == 0 ? (scale_byte & 0x0F) : (scale_byte >> 4U);
+    const float d = live ? __half2float(__ushort_as_half(b->d)) : 0.0F;
+    const float db = d * static_cast<float>(1 + (2 * nibble));
+    const std::uint8_t qh = b->qh[group];
+#pragma unroll
+    for (int l = 0; l < 4; ++l) {
+      const std::uint8_t signs = b->signs[(group * 4) + l];
+#pragma unroll
+      for (int half = 0; half < 2; ++half) {
+        const std::uint32_t index =
+            static_cast<std::uint32_t>(b->qs[(group * 8) + (2 * l) + half]) |
+            ((static_cast<std::uint32_t>(qh) << (8 - (2 * l) - half)) & 256U);
+        const std::uint32_t grid = quant_grids::kIq3sGrid[index];
+#pragma unroll
+        for (int p = 0; p < 2; ++p) {
+          const int jj = 2 * p;
+          const float m0 = static_cast<float>((grid >> (8 * jj)) & 0xFFU);
+          const float m1 = static_cast<float>((grid >> (8 * (jj + 1))) & 0xFFU);
+          const int j0 = (half * 4) + jj;
+          const int j1 = j0 + 1;
+          const float v0 = (signs & (1U << j0)) != 0 ? -db * m0 : db * m0;
+          const float v1 = (signs & (1U << j1)) != 0 ? -db * m1 : db * m1;
+          h[(l * 4) + (half * 2) + p] = __floats2half2_rn(v0, v1);
+        }
+      }
+    }
+  }
 }
 
 /// Bit `s` of each of the four bytes of `w`, packed into bits 0-3.
@@ -5346,6 +5498,23 @@ __launch_bounds__(256) __global__
   constexpr bool kQ6 = kType == WeightType::kQ6_K;
   constexpr bool kByteCodes = kQ8 || kQ6;
   constexpr bool kKQuant = kType == WeightType::kQ4_K || kQ5K;
+  // Packed low-bit formats: a grid/codebook lookup per 32-element group
+  // instead of the affine (scale, bias) pair. Their blocks are staged whole
+  // (a 256-element superblock, or one 32-element block for IQ4_NL) and
+  // dequantized in the compute stage, so a weight read is decoded once per
+  // tile instead of once per MMQ pass.
+  constexpr bool kIQ4 = kType == WeightType::kIQ4_NL;
+  constexpr bool kIQ = kIQ4 || kType == WeightType::kIQ2_S ||
+                       kType == WeightType::kIQ3_XXS ||
+                       kType == WeightType::kIQ3_S;
+  constexpr int kIqPerRow = kIQ4   ? 2 * static_cast<int>(sizeof(IQ4NlBlock))
+                            : kType == WeightType::kIQ2_S
+                                ? static_cast<int>(sizeof(IQ2SBlock))
+                            : kType == WeightType::kIQ3_XXS
+                                ? static_cast<int>(sizeof(IQ3XxsBlock))
+                            : kType == WeightType::kIQ3_S
+                                ? static_cast<int>(sizeof(IQ3SBlock))
+                                : 0;
   // 16-byte code chunks per row and stage: Q4_K's nibble pair and Q5_1's
   // two nibble blocks are two, the two byte-code blocks of Q8_0 and Q6_K
   // are four.
@@ -5372,7 +5541,9 @@ __launch_bounds__(256) __global__
   constexpr int kActBytes = BK * 4 * kActStride * 16;
   // The epilogue transposes one 16x16 tile per wave through the same
   // bytes (8 KB), which the narrow tile's stages do not reach.
-  constexpr int kStageBytes = kCodeBytes + kHighBytes + kScaleBytes + kActBytes;
+  constexpr int kIqBytes = kIQ ? BM * kIqPerRow : 0;
+  constexpr int kStageBytes =
+      kCodeBytes + kHighBytes + kScaleBytes + kActBytes + kIqBytes;
   constexpr int kEpilogueBytes = kPair ? BN * (BM / 2 + 2) * 2 : 8 * 1024;
   constexpr int kLdsBytes =
       kStageBytes > kEpilogueBytes ? kStageBytes : kEpilogueBytes;
@@ -5383,6 +5554,8 @@ __launch_bounds__(256) __global__
       reinterpret_cast<std::uint32_t*>(lds + kCodeBytes + kHighBytes);
   auto* s_act =
       reinterpret_cast<uint4*>(lds + kCodeBytes + kHighBytes + kScaleBytes);
+  auto* s_iq =
+      lds + kCodeBytes + kHighBytes + kScaleBytes + kActBytes;
 
   const std::int32_t tile = tiles[blockIdx.y];
   const int expert = tile & 0xFFFF;
@@ -5592,7 +5765,7 @@ __launch_bounds__(256) __global__
   uint4 own_codes[kWaveRowTiles];
   std::uint32_t own_scale[kWaveRowTiles];
   std::uint32_t own_high[kWaveRowTiles];
-  const auto commit_stage = [&]() {
+  const auto commit_stage = [&](int kb_stage) {
     if constexpr (kQ5) {
 #pragma unroll
       for (int i = 0; i < kQ5Fetch; ++i) {
@@ -5601,7 +5774,7 @@ __launch_bounds__(256) __global__
       }
     }
 #pragma unroll
-    for (int u = 0; u < (kQ5 ? 0 : kWaveRowTiles); ++u) {
+    for (int u = 0; u < ((kQ5 || kIQ) ? 0 : kWaveRowTiles); ++u) {
       const int row = (tid >> 1) + (u * 128);
       std::uint32_t scale_bias = 0;
       if constexpr (kPair) {
@@ -5666,6 +5839,26 @@ __launch_bounds__(256) __global__
       else
         s_scale[(f_c * BM) + row] = scale_bias;
     }
+    if constexpr (kIQ) {
+      // One superblock (or the next pair of IQ4_NL blocks) per row, copied
+      // cooperatively. The barrier after this lambda publishes it before the
+      // compute stage reads it.
+      if (kIQ4 || (kb_stage % 8) == 0) {
+        for (int r = tid; r < static_cast<int>(BM); r += 256) {
+          // `r` is the row inside this block's tile; the weight row is offset
+          // by the block's first row.
+          const int src_row = r_block + r;
+          const std::size_t rr = static_cast<std::size_t>(
+              src_row < m_i ? src_row : (m_i - 1));
+          const std::uint8_t* src =
+              w_expert + (rr * row_bytes) +
+              (kIQ4 ? static_cast<std::size_t>(kb_stage) * sizeof(IQ4NlBlock)
+                    : static_cast<std::size_t>(kb_stage / 8) * kIqPerRow);
+          __builtin_memcpy(
+              s_iq + (static_cast<std::size_t>(r) * kIqPerRow), src, kIqPerRow);
+        }
+      }
+    }
 #pragma unroll
     for (int i = 0; i < kActFetch; ++i) {
       if (a_slot[i] >= 0) {
@@ -5687,9 +5880,9 @@ __launch_bounds__(256) __global__
   // unsigned code whose zero is 32 (1056), the rest are unsigned (1024).
   constexpr float kMagic = kQ8 ? -1152.0F : kQ6 ? -1056.0F : -1024.0F;
   const __half2 magic = __floats2half2_rn(kMagic, kMagic);
-  const auto compute_stage = [&]() {
+  const auto compute_stage = [&](int kb_stage) {
     uint4 raw[kWaveRowTiles][BK];
-    if constexpr (!kByteCodes && !kQ5 && !kPair) {
+    if constexpr (!kByteCodes && !kQ5 && !kPair && !kIQ) {
 #pragma unroll
       for (int u = 0; u < kWaveRowTiles; ++u) {
         const int row = (wave_id * 16) + (u * 128) + sub_lane;
@@ -5751,6 +5944,18 @@ __launch_bounds__(256) __global__
 #pragma unroll
         for (int u = 0; u < kWaveRowTiles; ++u) {
           const int row = (wave_id * 16) + (u * 128) + sub_lane;
+          if constexpr (kIQ) {
+            const int block_index = kIQ4 ? kb : 0;
+            const int group = kIQ4 ? 0 : ((kb_stage + kb) % 8);
+            const std::uint8_t* base =
+                s_iq + (static_cast<std::size_t>(row) * kIqPerRow) +
+                (static_cast<std::size_t>(block_index) * sizeof(IQ4NlBlock));
+            __half2 h[16];
+            IqGroupHalves<kType>(base, group, (r_block + row) < m_i, h);
+            __builtin_memcpy(&a_lo[u], &h[0], 32);
+            __builtin_memcpy(&a_hi[u], &h[8], 32);
+            continue;
+          }
           // Q5_1 block kb of the row: d | m, the high-bit word, 16 codes.
           uint2 q5_head{};
           uint2 q5_lo{};
@@ -5863,12 +6068,12 @@ __launch_bounds__(256) __global__
   };
 
   const auto run_stage = [&](int kb0, int next_group) {
-    commit_stage();
+    commit_stage(kb0);
     __syncthreads();
     if (kb0 + BK < num_kb) {
       fetch_stage(kb0 + BK, next_group);
     }
-    compute_stage();
+    compute_stage(kb0);
     __syncthreads();
   };
   fetch_stage(0, 0);
@@ -6597,6 +6802,30 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
                          pad_bounds, rows_in, rows_out, swiglu_gate, out,
                          out_half, m, k, nullptr);
       return true;
+    case WeightType::kIQ4_NL:
+      hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kIQ4_NL, kBM, BN, kBK>),
+                         grid, dim3(kThreads), 0, stream, w, x, tiles,
+                         pad_bounds, rows_in, rows_out, swiglu_gate, out,
+                         out_half, m, k, nullptr);
+      return true;
+    case WeightType::kIQ2_S:
+      hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kIQ2_S, kBM, BN, kBK>),
+                         grid, dim3(kThreads), 0, stream, w, x, tiles,
+                         pad_bounds, rows_in, rows_out, swiglu_gate, out,
+                         out_half, m, k, nullptr);
+      return true;
+    case WeightType::kIQ3_XXS:
+      hipLaunchKernelGGL(
+          (RoutedF16GEMMKernel<WeightType::kIQ3_XXS, kBM, BN, kBK>), grid,
+          dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
+          rows_out, swiglu_gate, out, out_half, m, k, nullptr);
+      return true;
+    case WeightType::kIQ3_S:
+      hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kIQ3_S, kBM, BN, kBK>),
+                         grid, dim3(kThreads), 0, stream, w, x, tiles,
+                         pad_bounds, rows_in, rows_out, swiglu_gate, out,
+                         out_half, m, k, nullptr);
+      return true;
     case WeightType::kQ5_K:
       if constexpr (BN > 48) {
         return false;
@@ -6618,11 +6847,12 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    const std::int32_t* rows_in, const std::int32_t* rows_out,
                    const float* swiglu_gate, float* out, __half* out_half,
                    std::size_t m, std::size_t k, hipStream_t stream) {
-  const std::size_t block_elems = (type == WeightType::kQ4_K ||
-                                   type == WeightType::kQ5_K ||
-                                   type == WeightType::kQ6_K)
-                                      ? 256
-                                      : 64;
+  const std::size_t block_elems =
+      (type == WeightType::kQ4_K || type == WeightType::kQ5_K ||
+       type == WeightType::kQ6_K || type == WeightType::kIQ2_S ||
+       type == WeightType::kIQ3_XXS || type == WeightType::kIQ3_S)
+          ? 256
+          : (type == WeightType::kIQ4_NL ? 32 : 64);
   if (m == 0 || k == 0 || k % block_elems != 0 || n_tiles == 0 ||
       (out_half == nullptr) == (out == nullptr)) {
     return false;
@@ -6640,6 +6870,10 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
       return LaunchRoutedF16<64>(w, type, x, tiles, n_tiles, pad_bounds,
                                  rows_in, rows_out, swiglu_gate, out, out_half,
                                  m, k, stream);
+    case 128:
+      return LaunchRoutedF16<128>(w, type, x, tiles, n_tiles, pad_bounds,
+                                  rows_in, rows_out, swiglu_gate, out,
+                                  out_half, m, k, stream);
     default:
       return false;
   }

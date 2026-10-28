@@ -767,6 +767,10 @@ private:
   mutable std::uint32_t routed_max_rows_{0};  ///< 0 = no readback yet
   mutable std::uint32_t routed_n_tiles_{0};   ///< routed_tile_rows_ tiles
   mutable std::uint32_t routed_64_tiles_{0};  ///< wide batches' down tiles
+  /// The routed expert weights are a packed low-bit format: their only tier
+  /// is the non-paired F16 GEMM, so prefill builds 48-token tiles instead of
+  /// the 64/128-token pair the affine types use.
+  mutable bool routed_packed_experts_{false};
   mutable std::uint32_t routed_pair_offset_{0};
   mutable std::uint32_t routed_pair_tiles_{0};
   mutable std::uint32_t routed_tile_rows_{48};  ///< token rows per tile

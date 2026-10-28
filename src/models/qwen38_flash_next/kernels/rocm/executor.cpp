@@ -97,6 +97,24 @@ WeightType SmallType(GgmlType type) {
 /// True for the packed formats the small-matrix (SmallGemm) decode path can
 /// read directly. These are always routed through SmallGemm, including at
 /// prefill widths where the unquantized projections use hipBLAS.
+/// GUFO_F16_IQ=0 keeps packed expert weights on the MMQ pair path, for an
+/// A/B against the routed F16 tier on the same binary.
+bool F16IqEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("GUFO_F16_IQ");
+    return value == nullptr || std::strcmp(value, "0") != 0;
+  }();
+  return enabled;
+}
+
+/// Expert weights in a packed low-bit format: the F16 tier decodes them per
+/// 32-element group with the grid tables, and only the non-paired launches
+/// exist for them (the paired 128-token tile keeps codes in registers).
+bool IsPackedExpertType(GgmlType type) {
+  return type == GgmlType::kIQ4_NL || type == GgmlType::kIQ2_S ||
+         type == GgmlType::kIQ3_XXS || type == GgmlType::kIQ3_S;
+}
+
 bool IsSmallQuantFormat(GgmlType type) {
   return type == GgmlType::kQ5_1 || type == GgmlType::kQ4_K ||
          type == GgmlType::kQ5_K || type == GgmlType::kQ6_K ||
@@ -2840,13 +2858,27 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
 
 bool Executor::WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const {
   const Config& c = config();
-  return ExpertMatrixRows(n_tokens) &&
-         (l.ffn_gate_exps.type == GgmlType::kQ4_K ||
-          l.ffn_gate_exps.type == GgmlType::kQ5_K) &&
-         l.ffn_up_exps.type == l.ffn_gate_exps.type &&
-         (l.ffn_down_exps.type == GgmlType::kQ5_1 ||
-          l.ffn_down_exps.type == GgmlType::kQ8_0) &&
-         c.hidden_size % 256 == 0 && c.expert_ff % 64 == 0;
+  const auto affine_gate = l.ffn_gate_exps.type == GgmlType::kQ4_K ||
+                           l.ffn_gate_exps.type == GgmlType::kQ5_K;
+  const auto packed_gate =
+      IsPackedExpertType(l.ffn_gate_exps.type) && F16IqEnabled();
+  const auto down_ok = l.ffn_down_exps.type == GgmlType::kQ5_1 ||
+                       l.ffn_down_exps.type == GgmlType::kQ8_0 ||
+                       IsPackedExpertType(l.ffn_down_exps.type);
+  // Every tier decodes whole blocks: 256 elements for the K-quants and the
+  // IQ2_S/IQ3 families, 32 for IQ4_NL/Q5_1/Q8_0.
+  const auto rows_aligned = [&](GgmlType t, std::uint64_t k) {
+    if (t == GgmlType::kIQ4_NL || t == GgmlType::kQ5_1 ||
+        t == GgmlType::kQ8_0) {
+      return k % 32 == 0;
+    }
+    return k % 256 == 0;
+  };
+  return ExpertMatrixRows(n_tokens) && (affine_gate || packed_gate) &&
+         l.ffn_up_exps.type == l.ffn_gate_exps.type && down_ok &&
+         c.hidden_size % 256 == 0 && c.expert_ff % 64 == 0 &&
+         rows_aligned(l.ffn_gate_exps.type, c.hidden_size) &&
+         rows_aligned(l.ffn_down_exps.type, c.expert_ff);
 }
 
 bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
@@ -2855,6 +2887,12 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
   const Config& c = config();
   const std::uint32_t used = c.num_experts_used;
   const std::uint32_t slots = n_tokens * used;
+  const bool packed = IsPackedExpertType(l.ffn_gate_exps.type);
+  if (packed != routed_packed_experts_) {
+    routed_packed_experts_ = packed;
+    routed_max_rows_ = 0;  // rebuild the routed tiling for the other tier
+    routed_n_tiles_ = 0;
+  }
   if (!RouteHints(n_tokens, error_msg)) {
     return false;
   }
@@ -2882,33 +2920,69 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
     // Prefill pairs the gate/up projections and applies SwiGLU without
     // materializing the gate; decode-time batches keep separate projections.
     auto* up_half = reinterpret_cast<__half*>(s_.up_e);
-    const WeightType gate_type = l.ffn_gate_exps.type == GgmlType::kQ5_K
-                                     ? WeightType::kQ5_K
-                                     : WeightType::kQ4_K;
+    const auto weight_type = [](GgmlType t) {
+      switch (t) {
+        case GgmlType::kQ5_K:
+          return WeightType::kQ5_K;
+        case GgmlType::kQ6_K:
+          return WeightType::kQ6_K;
+        case GgmlType::kQ5_1:
+          return WeightType::kQ5_1;
+        case GgmlType::kQ8_0:
+          return WeightType::kQ8_0;
+        case GgmlType::kIQ4_NL:
+          return WeightType::kIQ4_NL;
+        case GgmlType::kIQ4_XS:
+          return WeightType::kIQ4_XS;
+        case GgmlType::kIQ3_XXS:
+          return WeightType::kIQ3_XXS;
+        case GgmlType::kIQ3_S:
+          return WeightType::kIQ3_S;
+        case GgmlType::kIQ2_S:
+          return WeightType::kIQ2_S;
+        default:
+          return WeightType::kQ4_K;
+      }
+    };
+    const WeightType gate_type = weight_type(l.ffn_gate_exps.type);
     const bool gated_ok =
-        routed_64_tiles_ != 0
+        routed_64_tiles_ != 0 && !routed_packed_experts_
             ? RoutedGatedF16Gemm(
                   l.ffn_gate_exps.data, l.ffn_up_exps.data, gate_type, x_half,
                   s_.routed_tiles + routed_pair_offset_, routed_pair_tiles_,
                   s_.routed_bounds, s_.rows_token, s_.rows_slot, up_half,
                   c.expert_ff, c.hidden_size, stream_)
-            : (RoutedF16Gemm(l.ffn_gate_exps.data, gate_type, x_half,
-                             s_.routed_tiles, routed_n_tiles_,
-                             routed_tile_rows_, s_.routed_bounds, s_.rows_token,
-                             s_.rows_slot, nullptr, s_.gate_e, nullptr,
-                             c.expert_ff, c.hidden_size, stream_) &&
-               RoutedF16Gemm(l.ffn_up_exps.data, gate_type, x_half,
-                             s_.routed_tiles, routed_n_tiles_,
-                             routed_tile_rows_, s_.routed_bounds, s_.rows_token,
-                             s_.rows_slot, s_.gate_e, nullptr, up_half,
-                             c.expert_ff, c.hidden_size, stream_));
+            : (RoutedF16Gemm(
+                   l.ffn_gate_exps.data, gate_type, x_half,
+                   routed_packed_experts_ && routed_64_tiles_ != 0
+                       ? s_.routed_tiles + routed_pair_offset_
+                       : s_.routed_tiles,
+                   routed_packed_experts_ && routed_64_tiles_ != 0
+                       ? routed_pair_tiles_
+                       : routed_n_tiles_,
+                   routed_packed_experts_ && routed_64_tiles_ != 0
+                       ? 128
+                       : routed_tile_rows_,
+                   s_.routed_bounds, s_.rows_token, s_.rows_slot, nullptr,
+                   s_.gate_e, nullptr, c.expert_ff, c.hidden_size, stream_) &&
+               RoutedF16Gemm(
+                   l.ffn_up_exps.data, gate_type, x_half,
+                   routed_packed_experts_ && routed_64_tiles_ != 0
+                       ? s_.routed_tiles + routed_pair_offset_
+                       : s_.routed_tiles,
+                   routed_packed_experts_ && routed_64_tiles_ != 0
+                       ? routed_pair_tiles_
+                       : routed_n_tiles_,
+                   routed_packed_experts_ && routed_64_tiles_ != 0
+                       ? 128
+                       : routed_tile_rows_,
+                   s_.routed_bounds, s_.rows_token, s_.rows_slot, s_.gate_e,
+                   nullptr, up_half, c.expert_ff, c.hidden_size, stream_));
     if (!gated_ok) {
       AssignError(error_msg, "routed F16 gate/up GEMM failed");
       return false;
     }
-    const WeightType down_type = l.ffn_down_exps.type == GgmlType::kQ8_0
-                                     ? WeightType::kQ8_0
-                                     : WeightType::kQ5_1;
+    const WeightType down_type = weight_type(l.ffn_down_exps.type);
     // Prefill takes the 64-token down tiles: they decode each expert's
     // weights over more rows, also where narrower tiles would be fewer.
     const bool wide_down = routed_64_tiles_ != 0;
