@@ -953,6 +953,12 @@ bool QwenDFlashGpuExecutor::InjectTargetContextRows(std::uint32_t position,
     hipStream_t stream;
     ~DrainContextUpload() { (void)hipStreamSynchronize(stream); }
   } drain{stream_};
+  const auto& weights = model_->GetWeights();
+  const auto& cfg = model_->GetConfig();
+  const std::size_t hidden_size = cfg.hidden_size;
+  const std::size_t enc_in_dim = GetTargetFeaturesSize();
+  const std::size_t kv_dim =
+      static_cast<std::size_t>(cfg.num_key_value_heads) * cfg.head_dim;
 
   // FC Projection & Norm
   RunInjectGemm(weights.fc_projection, d_target_features_, d_fused_features_,
