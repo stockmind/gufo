@@ -3158,7 +3158,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   }
   if (reader->GetMetadataString("general.architecture") == "qwen4exp") {
     if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
-        speculative_config.backend != TextSpeculativeBackend::kMtp) {
+        speculative_config.backend != TextSpeculativeBackend::kMtp &&
+        speculative_config.backend != TextSpeculativeBackend::kDFlash) {
       SetError(error,
                "Qwen3.8-Flash-Next HTTP models support only MTP speculative "
                "decoding (--speculative mtp --mtp-model)");
@@ -3193,6 +3194,10 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
             .max_context = max_context,
             .mtp_model_path =
                 speculative_config.backend == TextSpeculativeBackend::kMtp
+                    ? speculative_config.draft_model_path
+                    : std::string{},
+            .dflash_model_path =
+                speculative_config.backend == TextSpeculativeBackend::kDFlash
                     ? speculative_config.draft_model_path
                     : std::string{},
             .max_draft_tokens = speculative_config.max_draft_tokens,
@@ -3592,11 +3597,16 @@ bool InferenceBackend::load(
         "HTTP context exceeds the loaded Qwen3.8-Flash-Next model context");
     return false;
   }
+  const bool mtp_backend =
+      speculative_config.backend == TextSpeculativeBackend::kMtp;
+  const bool dflash_backend =
+      speculative_config.backend == TextSpeculativeBackend::kDFlash;
   if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
-      (speculative_config.backend != TextSpeculativeBackend::kMtp ||
-       !model->HasMtp())) {
+      ((!mtp_backend && !dflash_backend) ||
+       (mtp_backend && !model->HasMtp()) ||
+       (dflash_backend && !model->HasDflash()))) {
     SetError(error,
-             "Flash-Next MTP requires a model loaded with its draft sidecar");
+             "Flash-Next speculation requires the matching draft sidecar");
     return false;
   }
   if (speculative_config.backend == TextSpeculativeBackend::kMtp &&
@@ -3625,7 +3635,8 @@ bool InferenceBackend::load(
     new_state->supports_images = model->VisionEncoder() != nullptr;
     auto runner = std::make_shared<QwenFlashNextTextRunner>(
         std::move(model), max_context,
-        speculative_config.backend == TextSpeculativeBackend::kMtp,
+        speculative_config.backend == TextSpeculativeBackend::kMtp ||
+            speculative_config.backend == TextSpeculativeBackend::kDFlash,
         speculative_config.max_draft_tokens,
         disk_cache_config.model_artifact_fingerprint,
         disk_cache_config.draft_model_artifact_fingerprint);

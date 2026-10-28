@@ -216,7 +216,8 @@ ContinuationAdapter::ContinuationAdapter(std::shared_ptr<Model> model,
   if ((mode != core::SessionMode::kAutoregressive &&
        mode != core::SessionMode::kSpeculative) ||
       identity_.empty() || context > model_->MaxContext() ||
-      (mode == core::SessionMode::kSpeculative && !model_->HasMtp()))
+      (mode == core::SessionMode::kSpeculative && !model_->HasMtp() &&
+       !model_->HasDflash()))
     throw std::invalid_argument("invalid Flash-Next adapter configuration");
   const auto put = [&](std::uint32_t value) {
     for (unsigned i = 0; i < 4; ++i)

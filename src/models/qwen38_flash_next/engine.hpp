@@ -26,6 +26,11 @@ namespace gufo::core {
 class GgufReader;
 }
 
+namespace gufo::hip {
+class QwenDFlashGpuModel;
+class QwenDFlashGpuExecutor;
+}  // namespace gufo::hip
+
 namespace gufo::models::qwen38_flash_next {
 
 struct ModelWeights;
@@ -46,6 +51,9 @@ struct ModelOptions {
   /// Optional MTP draft sidecar (`mtp-...-shared-*.gguf`). Empty leaves
   /// speculative decoding off.
   std::string mtp_model_path;
+  /// Optional DFlash2 block-diffusion drafter. It reads target residuals
+  /// instead of an MTP head, so the two are alternatives.
+  std::string dflash_model_path;
   /// Maximum proposals per cycle; acceptance history selects the length.
   std::uint32_t max_draft_tokens = kMaxMtpDraftTokens;
   std::string vision_model_path;
@@ -90,6 +98,8 @@ public:
     return options_.max_context;
   }
   [[nodiscard]] bool HasMtp() const noexcept;
+  /// A block-diffusion drafter is loaded and bound to this target.
+  [[nodiscard]] bool HasDflash() const noexcept;
   [[nodiscard]] std::uint32_t DecodeConcurrency() const noexcept {
     return options_.decode_concurrency;
   }
@@ -116,6 +126,8 @@ private:
   std::shared_ptr<core::GgufReader> mtp_reader_;
   std::unique_ptr<ModelWeights> weights_;
   std::unique_ptr<MtpWeights> mtp_weights_;
+  /// Block-diffusion drafter bound to this target's embedding and head.
+  std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model_;
   std::unique_ptr<tokenization::QwenTokenizer> tokenizer_;
   std::unique_ptr<NgramTable> ngram_;
   std::unique_ptr<rocm::DeviceModel> device_;
@@ -320,6 +332,8 @@ private:
                     std::string* error_msg);
 
   std::shared_ptr<Model> model_;
+  struct DflashState;
+  std::unique_ptr<DflashState> dflash_;
   std::unique_ptr<rocm::Session> session_;
   std::vector<std::int32_t> tokens_;
   std::vector<float> logits_;
@@ -344,6 +358,14 @@ private:
   /// Brings the draft table up to the committed tokens.
   bool SyncDraftVocab(std::string* error_msg);
   [[nodiscard]] bool MtpEnabled() const noexcept;
+  /// An MTP predictor is loaded (a block-diffusion drafter is not one).
+  [[nodiscard]] bool MtpLoaded() const noexcept;
+  /// The drafter has consumed this session's frontier and can propose.
+  [[nodiscard]] bool DflashReady() const noexcept;
+  [[nodiscard]] bool InitDflash(std::string* error_msg);
+  [[nodiscard]] bool DflashPrime(std::string* error_msg);
+  [[nodiscard]] bool DflashCommit(std::uint32_t position, std::uint32_t rows,
+                                  std::string* error_msg);
 };
 
 /// Immutable session checkpoint. Committed cache rows may still reside in

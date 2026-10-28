@@ -162,6 +162,12 @@ std::optional<QwenDFlashWeights> QwenDFlashWeights::LoadFromGguf(
       }
     }
   }
+  if (!rotary_dim.has_value() && head_dim.has_value() && *head_dim != 0) {
+    // Some exports carry no rope metadata at all. Qwen's drafters rotate half
+    // of each head, so the head width is the only usable signal; a wrong guess
+    // shows up immediately as zero draft acceptance.
+    rotary_dim = *head_dim / 2;
+  }
   const auto context_length =
       RequiredUint32(reader, prefix + "context_length", error_msg);
   const auto num_layers =

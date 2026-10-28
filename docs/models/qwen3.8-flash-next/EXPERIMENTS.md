@@ -1,3 +1,36 @@
+## DFlash2 for Flash-Next: ported, measured, not enabled (October 28, 2026)
+
+The DFlash2 block-diffusion drafter is ported end to end: drafter taps and
+target-context rows (`src/models/qwen/hip/dflash/`), the `MeanStreams` residual
+mean, the executor's trunk capture (`--dflash-model` -> `ModelOptions.
+dflash_model_path`), `Session::{InitDflash,DflashPrime,DflashCommit,DflashReady}`,
+an acceptance-driven block draft in `PrepareDecode`, and the CLI gates for bench
+and serve. It runs, and it drafts: served greedy requests show 35-62% draft
+acceptance and no quality change.
+
+It is slower than MTP on the weights we serve, so it stays opt-in:
+
+| served prompt, 96 greedy tokens, 1 session | AR | MTP (draft 4) | DFlash2 (draft 8) |
+| --- | ---: | ---: | ---: |
+| code | - | **51.0** | 28.6 |
+| prose | - | **44.2** | 29.5 |
+| JSON | - | **56.0** | 38.7 |
+
+| `gufo bench -p 2048 -n 128 -r 3` | pp2048 | tg128 |
+| --- | ---: | ---: |
+| AR | 1812 | 29.52 |
+| MTP | 1748 | **48.13** |
+| DFlash2 | 1651 | 28.41 |
+
+Cause: the available drafter (`incoai/Qwen3.8-Flash-Next-DFlash2`, BF16) is
+trained against the base Qwen3.8-Flash-Next, while the daily driver is an
+abliterated fine-tune of it, so acceptance lands at ~35% against the MTP head's
+~70%. Two further findings bound the tuning: drafting the full eight slots
+instead of the controlled width drops acceptance to 12% and decode to 24.9
+tok/s, and the published 109 tok/s figure comes from a drafter matched to the
+served target. Once a drafter exists for the served weights, `--speculative
+dflash2 --dflash-model <file>` is a one-flag switch.
+
 ## Routed F16 tier parity harness (October 28, 2026)
 
 `tests/models/qwen38_flash_next/routed_gemm_parity_test.cpp` runs one expert's

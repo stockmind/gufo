@@ -898,9 +898,14 @@ int RunQwen38FlashNextBenchmark(
   }
   const std::size_t required_context = FlashNextBenchContext(options);
   const bool mtp = options.speculative_backend == "mtp";
-  if (!options.speculative_backend.empty() && !mtp) {
-    std::cerr << "Error: Qwen3.8-Flash-Next supports only --speculative mtp "
-                 "or off\n";
+  const bool dflash2 = options.speculative_backend == "dflash2";
+  if (!options.speculative_backend.empty() && !mtp && !dflash2) {
+    std::cerr << "Error: Qwen3.8-Flash-Next supports only --speculative "
+                 "mtp, dflash2 or off\n";
+    return 1;
+  }
+  if (dflash2 && options.dflash_model_path.empty()) {
+    std::cerr << "Error: --speculative dflash2 requires --dflash-model\n";
     return 1;
   }
   if (mtp && options.mtp_model_path.empty()) {
@@ -939,6 +944,7 @@ int RunQwen38FlashNextBenchmark(
       qfn::ModelOptions{
           .max_context = static_cast<std::uint32_t>(required_context),
           .mtp_model_path = mtp ? options.mtp_model_path : "",
+          .dflash_model_path = dflash2 ? options.dflash_model_path : "",
           .max_draft_tokens = std::max<std::uint32_t>(1, options.draft_tokens),
           .rope_scaling = rope_scaling,
       },

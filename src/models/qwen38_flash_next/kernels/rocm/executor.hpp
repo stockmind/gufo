@@ -271,6 +271,11 @@ public:
 
   ~Executor();
   [[nodiscard]] hipStream_t stream() const noexcept { return stream_; }
+  /// Mean residual rows captured for a block-diffusion drafter, in that
+  /// drafter's feature order; null when no capture layers were configured.
+  [[nodiscard]] float* dflash_capture() const noexcept {
+    return dflash_capture_;
+  }
   Executor(const Executor&) = delete;
   Executor& operator=(const Executor&) = delete;
 

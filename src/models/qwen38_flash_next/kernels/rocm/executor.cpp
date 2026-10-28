@@ -3253,7 +3253,7 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   const std::uint32_t start_pos = session.position_;
   if (!session.CheckCancellation(error_msg))
     return false;
-  if (session.mtp_enabled_ && prefill_phase &&
+  if (session.mtp_head_ && prefill_phase &&
       session.mtp_.position != start_pos) {
     AssignError(error_msg,
                 "MTP must consume the preceding frontier before prefill");
@@ -3371,7 +3371,7 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   if (sparse) {
     session.blocks_ = complete;
   }
-  if (session.mtp_enabled_ && prefill_phase && n > 1) {
+  if (session.mtp_head_ && prefill_phase && n > 1) {
     // Every successor except the last one is already known. Consume it while
     // the trunk residual is still in shared scratch. MtpBody reads that
     // residual into xn before reusing res for the predictor output.
@@ -3548,7 +3548,7 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
   const auto kept = std::min(
       checkpoint && checkpoint->tokens < n ? n - checkpoint->tokens : n,
       options_.max_speculative);
-  if (session.mtp_enabled_ &&
+  if (session.mtp_head_ &&
       !Check(hipMemcpyAsync(
                  session.mtp_.target_hidden,
                  s_.res + static_cast<std::size_t>(n - kept) * c.HcDim(),
@@ -4033,7 +4033,7 @@ std::uint64_t Executor::PrefillCheckpointBytes(const Session& session,
   h.blocks = c.compress_ratio > 0 && position > c.indexer_top_k
                  ? position / c.compress_ratio
                  : session.blocks_;
-  if (session.mtp_enabled_) {
+  if (session.mtp_head_) {
     h.mtp_position = position - 1;
     h.mtp_blocks = h.mtp_position > c.indexer_top_k
                        ? h.mtp_position / c.compress_ratio
@@ -4517,7 +4517,7 @@ bool Executor::MtpForward(Session& session,
   }
   if (!session.CheckCancellation(error_msg))
     return false;
-  if (!session.mtp_enabled_) {
+  if (!session.mtp_head_) {
     AssignError(error_msg, "no MTP block loaded");
     return false;
   }
