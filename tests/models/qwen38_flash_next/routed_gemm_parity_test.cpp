@@ -27,8 +27,8 @@ namespace {
 
 namespace q = gufo::models::qwen38_flash_next::rocm;
 
-constexpr std::uint32_t kRows = 640;      // gate/up rows of one expert
-constexpr std::uint32_t kHidden = 2560;   // K
+constexpr std::uint32_t kRows = 640;     // gate/up rows of one expert
+constexpr std::uint32_t kHidden = 2560;  // K
 
 void CheckHip(hipError_t error, const char* operation) {
   if (error != hipSuccess) {
@@ -48,7 +48,7 @@ struct Shape {
   const char* name;
   q::WeightType type;
   gufo::core::GgmlType file_type;
-  std::size_t block_bytes;   // per block of `block_elements`
+  std::size_t block_bytes;  // per block of `block_elements`
   std::size_t block_elements;
 };
 
@@ -90,8 +90,8 @@ bool Reference(const Shape& shape, const void* row_bytes, std::size_t k,
 // One expert whose T tokens all route to it, so a single tile covers the
 // bucket; `tile_rows` matches what the executor would build for that width.
 int RunShape(const Shape& shape) {
-  const std::size_t row_bytes = (kHidden / shape.block_elements) *
-                                shape.block_bytes;
+  const std::size_t row_bytes =
+      (kHidden / shape.block_elements) * shape.block_bytes;
   const std::size_t total = static_cast<std::size_t>(kRows) * row_bytes;
   std::vector<std::uint8_t> host(total);
   std::uint32_t seed = 0x12345678U;
@@ -135,8 +135,7 @@ int RunShape(const Shape& shape) {
                        hipMemcpyHostToDevice),
              "activation upload");
     std::vector<std::int32_t> bounds{0, static_cast<std::int32_t>(tokens)};
-    std::vector<std::int32_t> rows_token(tokens), rows_slot(tokens),
-        tiles{0};
+    std::vector<std::int32_t> rows_token(tokens), rows_slot(tokens), tiles{0};
     for (std::uint32_t t = 0; t < tokens; ++t) {
       rows_token[t] = static_cast<std::int32_t>(t);
       rows_slot[t] = static_cast<std::int32_t>(t);
@@ -151,9 +150,9 @@ int RunShape(const Shape& shape) {
     CheckHip(hipMalloc(&d_rt, row_bytes_meta), "rows alloc");
     CheckHip(hipMalloc(&d_rs, row_bytes_meta), "slots alloc");
     CheckHip(hipMalloc(&d_tiles, sizeof(std::int32_t)), "tiles alloc");
-    CheckHip(hipMemcpy(d_bounds, bounds.data(), bounds_bytes,
-                       hipMemcpyHostToDevice),
-             "bounds upload");
+    CheckHip(
+        hipMemcpy(d_bounds, bounds.data(), bounds_bytes, hipMemcpyHostToDevice),
+        "bounds upload");
     CheckHip(hipMemcpy(d_rt, rows_token.data(), row_bytes_meta,
                        hipMemcpyHostToDevice),
              "rows upload");
@@ -164,9 +163,9 @@ int RunShape(const Shape& shape) {
                        hipMemcpyHostToDevice),
              "tiles upload");
     const std::uint32_t tile_rows = tokens >= 128 ? 128U : 48U;
-    if (!q::RoutedF16Gemm(d_w, shape.type, d_x, d_tiles, 1, tile_rows,
-                          d_bounds, d_rt, d_rs, nullptr, d_out, nullptr, kRows,
-                          kHidden, nullptr)) {
+    if (!q::RoutedF16Gemm(d_w, shape.type, d_x, d_tiles, 1, tile_rows, d_bounds,
+                          d_rt, d_rs, nullptr, d_out, nullptr, kRows, kHidden,
+                          nullptr)) {
       if (tokens >= 128) {
         std::printf("  %-8s T=%-3u tile=%-3u launch rejected (BN>48)\n",
                     shape.name, tokens, tile_rows);
