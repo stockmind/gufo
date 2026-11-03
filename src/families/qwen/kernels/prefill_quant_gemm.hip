@@ -1079,6 +1079,7 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
     const bool ffn_up = (m == 17408 || (Batch >= 2 && m == 34816)) && k == 5120;
     if constexpr (Batch >= 3 && (WType == core::GgmlType::kIQ4_NL ||
                                  WType == core::GgmlType::kIQ3_S ||
+                                 WType == core::GgmlType::kIQ3_XXS ||
                                  WType == core::GgmlType::kQ6_K ||
                                  WType == core::GgmlType::kIQ4_XS)) {
       const bool ffn_down = m == 5120 && k == 17408;
@@ -1424,6 +1425,10 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
       LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kIQ3_S>(
           w, fp32_x, y, batch, m, k, grid, block, stream);
       return;
+    case core::GgmlType::kIQ3_XXS:
+      LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kIQ3_XXS>(
+          w, fp32_x, y, batch, m, k, grid, block, stream);
+      return;
     default:
       return;
   }
@@ -1500,6 +1505,10 @@ void LaunchKQuantWmmaGEMM(core::GgmlType type, const void* w,
     case core::GgmlType::kIQ3_S:
       LaunchKQuantWmmaGEMMTyped<core::GgmlType::kIQ3_S>(w, q8_1_x, y, batch, m,
                                                         k, stream);
+      return;
+    case core::GgmlType::kIQ3_XXS:
+      LaunchKQuantWmmaGEMMTyped<core::GgmlType::kIQ3_XXS>(w, q8_1_x, y, batch,
+                                                          m, k, stream);
       return;
     default:
       return;
