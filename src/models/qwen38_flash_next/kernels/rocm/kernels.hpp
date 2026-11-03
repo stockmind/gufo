@@ -44,6 +44,12 @@ enum class WeightType : std::uint32_t {
   kQ8_0 = 8,
   kQ4_K = 12,
   kQ5_K = 13,
+  kQ6_K = 14,
+  kIQ3_XXS = 18,
+  kIQ4_NL = 20,
+  kIQ3_S = 21,
+  kIQ2_S = 22,
+  kIQ4_XS = 23,
   kBF16 = 30,
 };
 
@@ -280,6 +286,12 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
 /// not depend on its position in the batch (BlasLt::Gemm). out is [batch][m].
 bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
                    std::size_t m, std::size_t k, hipStream_t stream);
+/// Same F16 WMMA tier and tile plan, but the weights are compact row-major
+/// Q6_K [m][k] dequantized to F16 in LDS. Avoids both the MMQ path and the
+/// 2x weight bytes of a materialized F16 copy. k must be a multiple of 256.
+bool DenseF16GemmQ6K(const void* w, const __half* x, float* out,
+                     std::size_t batch, std::size_t m, std::size_t k,
+                     hipStream_t stream);
 
 /// Most checkpoints one prefill pass captures in place.
 inline constexpr std::uint32_t kMaxPassCheckpoints = 4;
@@ -330,10 +342,10 @@ void RoutedCompact(const std::int32_t* ids, const std::uint32_t* counts,
 /// projection's F32 output over the same rows) turns it into
 /// silu(gate) * result.
 /// `tile_rows` is the token rows per tile the map was built with: 16 or 48,
-/// or 128 for the prefill down projection (Q5_1/Q8_0, F16 output and no
+/// or 128 for the prefill down projection (Q5_1/Q6_K/Q8_0, F16 output and no
 /// `swiglu_gate`). Every tile height gives each row the same bits.
-/// Q4_K and Q5_K need k % 256 == 0, Q5_1 and Q8_0 k % 64 == 0; other types
-/// and tile widths return false.
+/// Q4_K, Q5_K and Q6_K need k % 256 == 0, Q5_1 and Q8_0 k % 64 == 0; other
+/// types and tile widths return false.
 bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    const std::int32_t* tiles, std::uint32_t n_tiles,
                    std::uint32_t tile_rows, const std::int32_t* pad_bounds,
@@ -341,7 +353,7 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    const float* swiglu_gate, float* out, __half* out_half,
                    std::size_t m, std::size_t k, hipStream_t stream);
 
-/// Paired Q4_K/Q5_K gate/up GEMM with SwiGLU and F16 output. Uses the same
+/// Paired Q4_K/Q5_K/Q6_K/Q8_0 gate/up GEMM with SwiGLU and F16 output. Uses the same
 /// routing layout as RoutedF16Gemm, with 128 token rows per tile. The two
 /// projections share one launch and never materialize the gate output;
 /// every row equals the separate gate and up launches bit for bit.

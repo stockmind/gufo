@@ -75,9 +75,57 @@ WeightType SmallType(GgmlType type) {
       return WeightType::kQ8_0;
     case GgmlType::kF32:
       return WeightType::kF32;
+    case GgmlType::kQ5_1:
+      return WeightType::kQ5_1;
+    case GgmlType::kQ4_K:
+      return WeightType::kQ4_K;
+    case GgmlType::kQ5_K:
+      return WeightType::kQ5_K;
+    case GgmlType::kQ6_K:
+      return WeightType::kQ6_K;
+    case GgmlType::kIQ4_NL:
+      return WeightType::kIQ4_NL;
+    case GgmlType::kIQ4_XS:
+      return WeightType::kIQ4_XS;
+    case GgmlType::kIQ3_XXS:
+      return WeightType::kIQ3_XXS;
+    case GgmlType::kIQ3_S:
+      return WeightType::kIQ3_S;
+    case GgmlType::kIQ2_S:
+      return WeightType::kIQ2_S;
     default:
       throw std::logic_error("unsupported Flash-Next matrix format");
   }
+}
+
+/// True for the packed formats the small-matrix (SmallGemm) decode path can
+/// read directly. These are always routed through SmallGemm, including at
+/// prefill widths where the unquantized projections use hipBLAS.
+bool IsSmallQuantFormat(GgmlType type) {
+  return type == GgmlType::kQ5_1 || type == GgmlType::kQ4_K ||
+         type == GgmlType::kQ5_K || type == GgmlType::kQ6_K ||
+         type == GgmlType::kIQ4_NL || type == GgmlType::kIQ4_XS ||
+         type == GgmlType::kIQ3_XXS || type == GgmlType::kIQ3_S ||
+         type == GgmlType::kIQ2_S;
+}
+
+/// Decode GEMV row limit for the packed formats. At N=1 the tiled MMQ wastes
+/// all but one column, so the row-wise GEMV is preferred regardless of row
+/// count; formats are enabled past the validated 4096-row floor as their
+/// dedicated kernels land.
+bool DenseVecWanted(GgmlType type, std::uint32_t rows) {
+  (void)type;
+  return rows <= 4096;
+}
+
+/// True when a large-row Q6_K dense matrix should use the dedicated warp-per-
+/// row GEMV instead of an N<=8 MMQ tile. The output head is the case that
+/// matters: one logits row over 248320 rows, where a 16-wide MMQ tile computes
+/// fifteen dead columns. Bounded to N<=8 so every row's K reduction matches the
+/// small-row GEMV, and to the exactly-divisible 256-multiple K.
+bool DenseQ6KGemvWanted(const DeviceTensor& w, std::uint32_t n_tokens) {
+  return w.type == GgmlType::kQ6_K && w.experts == 1 && n_tokens <= 8 &&
+         w.cols % 256 == 0;
 }
 
 // The tier's tiled kernels compute whole column tiles; below this width the
@@ -1936,6 +1984,20 @@ bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
     }
     return true;
   }
+  if (IsSmallQuantFormat(w.type) && DenseVecWanted(w.type, w.rows) &&
+      q.data != nullptr) {
+    if (w.cols != q.k) {
+      AssignError(error_msg, "quantized input width mismatch");
+      return false;
+    }
+    if (qfn_mmq_dense_vec(static_cast<int>(w.type), w.data, q.data, out,
+                          static_cast<int>(w.rows), static_cast<int>(q.n),
+                          static_cast<int>(w.cols), stream_) != 0) {
+      AssignError(error_msg, "quantized dense GEMV failed");
+      return false;
+    }
+    return true;
+  }
   return Dense(w, q.x, out, q.n, error_msg);
 }
 
@@ -2069,6 +2131,45 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
         AssignError(error_msg, "W8A8 GEMM failed");
         return false;
       }
+    }
+    return true;
+  }
+  // Dense Q6_K stays compact but runs wide prefill on the F16 WMMA tier with
+  // an in-LDS dequant, instead of the dequant-bound MMQ path. Decode keeps
+  // its Q6_K GEMV/MMQ.
+  if (MatrixRows(n_tokens) && n_tokens <= options_.max_batch &&
+      w.type == GgmlType::kQ6_K && w.experts == 1 && w.cols % 256 == 0 &&
+      w.cols <= model_->max_half_cols()) {
+    PrepareHalfInput(x, n_tokens, w.cols);
+    if (!DenseF16GemmQ6K(w.data, static_cast<const __half*>(s_.x_half), out,
+                         n_tokens, w.rows, w.cols, stream_)) {
+      AssignError(error_msg, "dense Q6_K F16 GEMM failed");
+      return false;
+    }
+    return true;
+  }
+  if (IsSmallQuantFormat(w.type)) {
+    if (!MatrixRows(n_tokens) &&
+        (DenseVecWanted(w.type, w.rows) ||
+         DenseQ6KGemvWanted(w, n_tokens))) {
+      Q8Input q;
+      if (!Quantize(x, n_tokens, w.cols, &q, error_msg)) {
+        return false;
+      }
+      if (qfn_mmq_dense_vec(static_cast<int>(w.type), w.data, q.data, out,
+                            static_cast<int>(w.rows),
+                            static_cast<int>(n_tokens),
+                            static_cast<int>(w.cols), stream_) != 0) {
+        AssignError(error_msg, "quantized dense GEMV failed");
+        return false;
+      }
+      return true;
+    }
+    if (qfn_mmq_dense(static_cast<int>(w.type), w.data, x, out,
+                      static_cast<int>(w.rows), static_cast<int>(n_tokens),
+                      static_cast<int>(w.cols), stream_) != 0) {
+      AssignError(error_msg, "quantized dense projection failed");
+      return false;
     }
     return true;
   }
@@ -2212,6 +2313,13 @@ bool Executor::Experts(const DeviceTensor& w, const float* x,
       case GgmlType::kQ8_0:
         rc = qfn_mmq_q8_0_moe_raw(w.data, x, ids, out, M, K, T, E, U, stream_);
         break;
+      case GgmlType::kIQ2_S:
+      case GgmlType::kIQ3_XXS:
+      case GgmlType::kIQ3_S:
+      case GgmlType::kIQ4_NL:
+        rc = qfn_mmq_moe_raw(static_cast<int>(w.type), w.data, x, ids, out, M,
+                             K, T, E, U, stream_);
+        break;
       default:
         break;
     }
@@ -2257,6 +2365,21 @@ bool Executor::GatedExperts(const DeviceTensor& a, const DeviceTensor& b,
                         static_cast<int>(n_used), stream_, b.data,
                         s_.up_e) != 0) {
       AssignError(error_msg, "expert vector pair GEMM failed");
+      return false;
+    }
+  } else if (same_shape &&
+             (a.type == GgmlType::kIQ2_S || a.type == GgmlType::kIQ3_XXS ||
+              a.type == GgmlType::kIQ3_S || a.type == GgmlType::kIQ4_NL)) {
+    // Gate/up share shape, routing and input: build the gather map and
+    // quantize the activations once, then run both MMQ projections back to
+    // back instead of rebuilding both for the second projection.
+    RoutedHints(a, n_tokens);
+    if (qfn_mmq_moe_pair(
+            static_cast<int>(a.type), a.data, b.data, x, ids, out, s_.up_e,
+            static_cast<int>(a.rows), static_cast<int>(a.cols),
+            static_cast<int>(n_tokens), static_cast<int>(a.experts),
+            static_cast<int>(n_used), stream_) != 0) {
+      AssignError(error_msg, "expert pair GEMM failed");
       return false;
     }
   } else if (same_shape && a.type == GgmlType::kQ4_K) {
