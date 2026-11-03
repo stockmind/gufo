@@ -212,6 +212,30 @@ int main(int argc, const char* const* argv) {
     Expect(
         second_proposal.tokens == expected_proposal.tokens,
         "feedback replay must match teacher-forced committed target features");
+
+    // Snapshot the committed boundary and require a fresh backend restored from
+    // it (in RAM and from the persistent payload) to reproduce the proposal.
+    const auto snapshot = draft_backend->Snapshot();
+    Expect(snapshot != nullptr, "MTP draft snapshot");
+    auto restored_backend = gufo::hip::QwenMtpGpuDraftBackend::Create(
+        mtp_model, draft_config, &error);
+    Expect(restored_backend != nullptr, error);
+    restored_backend->RestoreSnapshot(*snapshot);
+    const auto restored_proposal = restored_backend->Propose(sequence, 4, 2);
+    Expect(restored_proposal.tokens == second_proposal.tokens,
+           "MTP snapshot restore must reproduce the committed proposal");
+
+    std::vector<std::uint8_t> persistent(snapshot->PersistentPayloadBytes());
+    const auto written = snapshot->SerializePersistent(persistent);
+    Expect(written == persistent.size(), "MTP persistent serialize size");
+    auto persistent_backend = gufo::hip::QwenMtpGpuDraftBackend::Create(
+        mtp_model, draft_config, &error);
+    Expect(persistent_backend != nullptr, error);
+    persistent_backend->RestorePersistentSnapshot(persistent);
+    const auto persistent_proposal = persistent_backend->Propose(sequence, 4, 2);
+    Expect(persistent_proposal.tokens == second_proposal.tokens,
+           "MTP persistent restore must reproduce the committed proposal");
+
     draft_backend->Reset();
 
     std::cout << "qwen_mtp_gpu_test: token=" << token

@@ -9,6 +9,7 @@
 namespace gufo::hip {
 class QwenGpuModel;
 class QwenDFlashGpuModel;
+class QwenMtpGpuModel;
 }  // namespace gufo::hip
 
 namespace gufo::speculative {
@@ -24,6 +25,7 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
 std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
     std::shared_ptr<const hip::QwenGpuModel> model, std::uint32_t max_context,
     std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model,
+    std::shared_ptr<const hip::QwenMtpGpuModel> mtp_model,
     const speculative::SpeculativeOptions& speculative_options,
     speculative::DFlashDraftPolicy dflash_policy,
     std::string artifact_fingerprint, std::string draft_artifact_fingerprint);

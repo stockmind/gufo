@@ -520,7 +520,8 @@ __launch_bounds__(WM * WN * 32) __global__
             LoadSwizzled(&s_b[ks][(wt * WTS) + j][sl ^ (ks & 3)][0]);
 #pragma unroll
         for (int i = 0; i < WRS; ++i) {
-          if constexpr (Type == gufo::core::GgmlType::kIQ3_S)
+          if constexpr (Type == gufo::core::GgmlType::kIQ3_S ||
+                        Type == gufo::core::GgmlType::kIQ3_XXS)
             acc[i][j] = WmmaHalf(a[i], b, acc[i][j]);
           else
             acc[i][j] = WmmaHalf(b, a[i], acc[i][j]);
@@ -556,7 +557,8 @@ __launch_bounds__(WM * WN * 32) __global__
   };
   const int hi = lane / 16;
   if constexpr (Paired) {
-    static_assert(WRS % 2 == 0 && Type != gufo::core::GgmlType::kIQ3_S);
+    static_assert(WRS % 2 == 0 && Type != gufo::core::GgmlType::kIQ3_S &&
+                  Type != gufo::core::GgmlType::kIQ3_XXS);
     // Adjacent 16-row fragments hold gate and up for the same logical rows.
     // One wave owns both accumulators, so no intermediate store or exchange
     // between waves is needed.
@@ -578,7 +580,8 @@ __launch_bounds__(WM * WN * 32) __global__
         }
       }
     }
-  } else if constexpr (Type != gufo::core::GgmlType::kIQ3_S) {
+  } else if constexpr (Type != gufo::core::GgmlType::kIQ3_S &&
+                       Type != gufo::core::GgmlType::kIQ3_XXS) {
 #pragma unroll
     for (int i = 0; i < WRS; ++i) {
 #pragma unroll
@@ -783,6 +786,9 @@ void DirectGemm(gufo::core::GgmlType type, const void* w, const void* x,
       break;
     case GgmlType::kIQ3_S:
       launch.template operator()<GgmlType::kIQ3_S>();
+      break;
+    case GgmlType::kIQ3_XXS:
+      launch.template operator()<GgmlType::kIQ3_XXS>();
       break;
     default:
       throw std::runtime_error("unexpected half prefill weight format");

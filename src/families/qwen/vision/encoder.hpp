@@ -5,16 +5,40 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "src/core/image.hpp"
 
 namespace gufo::models::qwen::vision {
 
-/// Shared Qwen3.8 ViT operator graph. Each model supplies and validates its
-/// own projector/output width; language-model state never lives here.
+/// How a Qwen language trunk reaches its vision sidecar. The projector output
+/// width is the trunk's embedding length; text-only architectures return
+/// std::nullopt.
+struct VisionSidecarPlan {
+  std::uint32_t output_width{0};
+  /// qwen35 (Qwen3.8-27B) keeps a canonical mmproj-BF16.gguf beside the target.
+  /// qwen35moe models share a directory with other quantizations, so discovery
+  /// by filename is ambiguous and an explicit --mmproj is required.
+  bool discover_beside_target{false};
+};
+
+[[nodiscard]] constexpr std::optional<VisionSidecarPlan> PlanVisionSidecar(
+    std::string_view architecture, std::uint32_t embedding_length) noexcept {
+  if (embedding_length == 0)
+    return std::nullopt;
+  if (architecture == "qwen35")
+    return VisionSidecarPlan{embedding_length, true};
+  if (architecture == "qwen35moe")
+    return VisionSidecarPlan{embedding_length, false};
+  return std::nullopt;
+}
+
+/// Shared Qwen ViT operator graph. Each model supplies and validates its own
+/// projector/output width; language-model state never lives here.
 class Encoder {
 public:
   class Embedding {

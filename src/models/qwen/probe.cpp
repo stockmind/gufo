@@ -14,7 +14,8 @@ bool ProbeQwenGguf(const core::GgufReader& reader) {
     return false;
   }
   if (architecture != "qwen" && architecture != "qwen2" &&
-      architecture != "qwen35" && architecture != "qwen38") {
+      architecture != "qwen35" && architecture != "qwen35moe" &&
+      architecture != "qwen38") {
     return false;
   }
   const std::string prefix = std::string(architecture) + ".";
@@ -22,6 +23,10 @@ bool ProbeQwenGguf(const core::GgufReader& reader) {
       reader.GetMetadataUint64("qwen35.embedding_length")
           .value_or(reader.GetMetadataUint64(prefix + "embedding_length")
                         .value_or(0));
+  // Qwen3.8-27B keeps 5120; the Qwen3.6-35B-A3B MoE trunk is 2048 wide.
+  if (architecture == "qwen35moe") {
+    return embedding_length != 0;
+  }
   return embedding_length == 5120;
 }
 

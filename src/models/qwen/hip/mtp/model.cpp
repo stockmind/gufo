@@ -12,6 +12,7 @@
 
 #include "src/models/qwen/hip/mtp.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
+#include "src/families/qwen/kernels/ops/token.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -43,6 +44,14 @@ void ReadMatrixRow(const models::QwenTensorRef& tensor, std::size_t row,
     std::copy_n(source, columns, output);
     return;
   }
+  if (tensor.type == core::GgmlType::kF16) {
+    const std::size_t offset = row * columns;
+    for (std::size_t column = 0; column < columns; ++column) {
+      output[column] = quant::Fp16ToFloat(
+          static_cast<const std::uint16_t*>(tensor.data)[offset + column]);
+    }
+    return;
+  }
   if (tensor.type == core::GgmlType::kBF16) {
     const std::size_t offset = row * columns;
     for (std::size_t column = 0; column < columns; ++column) {
@@ -67,6 +76,9 @@ void ReadMatrixRow(const models::QwenTensorRef& tensor, std::size_t row,
       return;
     case core::GgmlType::kQ6_K:
       quant::DequantizeQ6_K(source, output, columns);
+      return;
+    case core::GgmlType::kQ8_0:
+      quant::DequantizeQ8_0(source, output, columns);
       return;
     default:
       throw std::runtime_error("unsupported MTP matrix type");
@@ -137,6 +149,25 @@ models::QwenTensorRef PackMatrixBf16(const models::QwenTensorRef& source,
   };
 }
 
+/// Copies a tensor to device memory in its stored format. MoE tensors keep
+/// their quantized encoding so the MTP layer reuses the target's decode MoE
+/// kernels (and expert matrices are too large to widen to BF16).
+models::QwenTensorRef CopyRawToDevice(const models::QwenTensorRef& source,
+                                      std::vector<void*>& allocations,
+                                      std::size_t& packed_bytes) {
+  const std::size_t bytes = source.EncodedSizeBytes();
+  if (bytes == 0) {
+    throw std::runtime_error("unsupported MTP MoE tensor type");
+  }
+  void* device = detail::AllocateDevice(bytes);
+  allocations.push_back(device);
+  CopyToDevice(device, source.data, bytes);
+  packed_bytes += bytes;
+  models::QwenTensorRef copy = source;
+  copy.data = device;
+  return copy;
+}
+
 void ReleaseAllocations(std::vector<void*>& allocations) noexcept {
   for (void* allocation : allocations) {
     if (allocation != nullptr) {
@@ -182,6 +213,26 @@ void PackPrivateWeights(speculative::QwenMtpWeights& weights,
                                     allocations, packed_bytes);
   layer.ffn_norm =
       CopyVectorF32(layer.ffn_norm, hidden, allocations, packed_bytes);
+  if (weights.config.IsMoE()) {
+    // The shared MoE decode router GEMV accepts F32/BF16 only, but llama.cpp
+    // emits the Qwen3.6-35B-A3B MTP router gates as F16. Widen just those two
+    // tiny matrices; the routed experts keep their packed quantized form.
+    const auto pack_router = [&](models::QwenTensorRef& tensor,
+                                 std::size_t rows) {
+      tensor =
+          tensor.type == core::GgmlType::kF16
+              ? PackMatrixBf16(tensor, rows, hidden, allocations, packed_bytes)
+              : CopyRawToDevice(tensor, allocations, packed_bytes);
+    };
+    pack_router(layer.ffn_gate_inp, weights.config.expert_count);
+    pack_router(layer.ffn_gate_inp_shexp, 1);
+    for (auto* tensor :
+         {&layer.ffn_gate_exps, &layer.ffn_up_exps, &layer.ffn_down_exps,
+          &layer.ffn_gate_shexp, &layer.ffn_up_shexp, &layer.ffn_down_shexp}) {
+      *tensor = CopyRawToDevice(*tensor, allocations, packed_bytes);
+    }
+    return;
+  }
   layer.ffn_gate = PackMatrixBf16(layer.ffn_gate, intermediate, hidden,
                                   allocations, packed_bytes);
   layer.ffn_up = PackMatrixBf16(layer.ffn_up, intermediate, hidden, allocations,
@@ -234,6 +285,14 @@ std::shared_ptr<const QwenMtpGpuModel> QwenMtpGpuModel::Create(
 
   std::vector<void*> allocations;
   std::size_t packed_bytes = 0;
+  // The first greedy verification otherwise resolves the shared argmax
+  // module on the decode path. Preparation launches no trial kernels.
+  if (PrepareBatchedGPUArgmax() != hipSuccess) {
+    if (error_msg != nullptr) {
+      *error_msg = "MTP argmax preparation failed";
+    }
+    return nullptr;
+  }
   const auto start = std::chrono::steady_clock::now();
   try {
     PackPrivateWeights(*weights, allocations, packed_bytes);

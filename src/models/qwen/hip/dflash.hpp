@@ -124,6 +124,11 @@ public:
   [[nodiscard]] std::size_t GetPackedWeightBytes() const noexcept {
     return packed_weight_bytes_;
   }
+  /// MoE targets carry no exact cold/live continuation contract, so the draft
+  /// may project prompt context on matrix cores.
+  [[nodiscard]] bool TargetIsMoE() const noexcept {
+    return target_model_ != nullptr && target_model_->GetConfig().IsMoE();
+  }
 
   /// Draft vocabulary (draft_vocab.hpp): the head's leading rows, scored in
   /// place. Zero when every draft scores the full head.
@@ -396,7 +401,7 @@ public:
   }
   /// The most recent verification has not yet injected these target rows.
   /// Discard them when the target returns to its saved verification frontier.
-  void DiscardPendingTargetContext(std::uint32_t position);
+  void DiscardPendingTargetContext(std::uint32_t position) override;
 
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const noexcept {
     return executor_->GetMemoryUsage();
