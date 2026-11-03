@@ -68,6 +68,21 @@ std::optional<core::ModelConfig> ExtractQwenConfig(
   } else {
     config.rotary_dim = config.head_dim;
   }
+  // 2b. MoE hyperparameters (absent on dense models)
+  if (auto val = reader.GetMetadataUint32(prefix + "expert_count")) {
+    config.expert_count = *val;
+  }
+  if (auto val = reader.GetMetadataUint32(prefix + "expert_used_count")) {
+    config.expert_used_count = *val;
+  }
+  if (auto val =
+          reader.GetMetadataUint32(prefix + "expert_feed_forward_length")) {
+    config.expert_ff_length = *val;
+  }
+  if (auto val = reader.GetMetadataUint32(
+          prefix + "expert_shared_feed_forward_length")) {
+    config.expert_shared_ff_length = *val;
+  }
 
   // 3. MTP speculative layers are included in qwen35.block_count but are not
   // part of the main autoregressive transformer stack.
@@ -83,6 +98,17 @@ std::optional<core::ModelConfig> ExtractQwenConfig(
     return std::nullopt;
   }
   config.num_layers = total_layers - layers_in_block_count;
+
+  if (config.IsMoE() &&
+      (config.expert_used_count == 0 ||
+       config.expert_used_count > config.expert_count ||
+       config.expert_ff_length == 0 ||
+       config.expert_shared_ff_length == 0)) {
+    if (error_msg != nullptr) {
+      *error_msg = "Model config has incomplete MoE hyperparameters";
+    }
+    return std::nullopt;
+  }
 
   // 4. Assert text-only contract
   if (reader.HasVisionTensors()) {

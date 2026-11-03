@@ -140,6 +140,19 @@ struct IQ3SBlock {
 };
 static_assert(sizeof(IQ3SBlock) == 110, "block_iq3_s must be 110 bytes");
 
+// IQ3_XXS: super-block of 256, distinct from IQ3_S. Each group of eight
+// elements is two 256-entry kDeviceIq3xxsGrid lookups; the 4-bit super-scale
+// and four 7-bit sign indices for a 32-element group are packed into one
+// little-endian word of scales_and_signs. 98 bytes.
+constexpr std::size_t kIQ3XXSBlockSize = 256;
+
+struct IQ3XXSBlock {
+  __half d;
+  std::uint8_t qs[64];
+  std::uint8_t scales_and_signs[32];
+};
+static_assert(sizeof(IQ3XXSBlock) == 98, "block_iq3_xxs must be 98 bytes");
+
 // Non-linear 4-bit codebook shared by IQ4_NL and IQ4_XS. Mirrors
 // quant::kValuesIq4Nl (kvalues_iq4nl in ggml-common.h).
 __device__ inline constexpr std::int8_t kDeviceValuesIq4Nl[16] = {
@@ -167,6 +180,8 @@ __device__ inline std::size_t QuantBlockBytes(core::GgmlType t) {
       return sizeof(IQ4XSBlock);
     case core::GgmlType::kIQ3_S:
       return sizeof(IQ3SBlock);
+    case core::GgmlType::kIQ3_XXS:
+      return sizeof(IQ3XXSBlock);
     default:
       return 0;
   }
@@ -192,6 +207,8 @@ __device__ inline std::size_t QuantBlockQK(core::GgmlType t) {
       return kIQ4XSBlockSize;
     case core::GgmlType::kIQ3_S:
       return kIQ3SBlockSize;
+    case core::GgmlType::kIQ3_XXS:
+      return kIQ3XXSBlockSize;
     default:
       return 0;
   }
@@ -400,6 +417,56 @@ __device__ inline constexpr std::uint32_t kDeviceIq3sGrid[512] = {
     0x0f07070bU, 0x0f070b07U, 0x0f090103U, 0x0f09010bU, 0x0f090307U,
     0x0f090501U, 0x0f090b01U, 0x0f0b0505U, 0x0f0b0905U, 0x0f0d0105U,
     0x0f0d0703U, 0x0f0f0101U,
+};
+
+// opt-iq3xxs: 256-entry IQ3_XXS grid, verbatim from ggml-common.h. Each
+// word packs four uint8 magnitudes for one group of four elements.
+__device__ inline constexpr std::uint32_t kDeviceIq3xxsGrid[256] = {
+    0x04040404U, 0x04040414U, 0x04040424U, 0x04040c0cU, 0x04040c1cU, 0x04040c3eU, 0x04041404U, 0x04041414U,
+    0x04041c0cU, 0x04042414U, 0x04043e1cU, 0x04043e2cU, 0x040c040cU, 0x040c041cU, 0x040c0c04U, 0x040c0c14U,
+    0x040c140cU, 0x040c142cU, 0x040c1c04U, 0x040c1c14U, 0x040c240cU, 0x040c2c24U, 0x040c3e04U, 0x04140404U,
+    0x04140414U, 0x04140424U, 0x04140c0cU, 0x04141404U, 0x04141414U, 0x04141c0cU, 0x04141c1cU, 0x04141c3eU,
+    0x04142c0cU, 0x04142c3eU, 0x04143e2cU, 0x041c040cU, 0x041c043eU, 0x041c0c04U, 0x041c0c14U, 0x041c142cU,
+    0x041c3e04U, 0x04240c1cU, 0x04241c3eU, 0x04242424U, 0x04242c3eU, 0x04243e1cU, 0x04243e2cU, 0x042c040cU,
+    0x042c043eU, 0x042c1c14U, 0x042c2c14U, 0x04341c2cU, 0x04343424U, 0x043e0c04U, 0x043e0c24U, 0x043e0c34U,
+    0x043e241cU, 0x043e340cU, 0x0c04040cU, 0x0c04041cU, 0x0c040c04U, 0x0c040c14U, 0x0c04140cU, 0x0c04141cU,
+    0x0c041c04U, 0x0c041c14U, 0x0c041c24U, 0x0c04243eU, 0x0c042c04U, 0x0c0c0404U, 0x0c0c0414U, 0x0c0c0c0cU,
+    0x0c0c1404U, 0x0c0c1414U, 0x0c14040cU, 0x0c14041cU, 0x0c140c04U, 0x0c140c14U, 0x0c14140cU, 0x0c141c04U,
+    0x0c143e14U, 0x0c1c0404U, 0x0c1c0414U, 0x0c1c1404U, 0x0c1c1c0cU, 0x0c1c2434U, 0x0c1c3434U, 0x0c24040cU,
+    0x0c24042cU, 0x0c242c04U, 0x0c2c1404U, 0x0c2c1424U, 0x0c2c2434U, 0x0c2c3e0cU, 0x0c34042cU, 0x0c3e1414U,
+    0x0c3e2404U, 0x14040404U, 0x14040414U, 0x14040c0cU, 0x14040c1cU, 0x14041404U, 0x14041414U, 0x14041434U,
+    0x14041c0cU, 0x14042414U, 0x140c040cU, 0x140c041cU, 0x140c042cU, 0x140c0c04U, 0x140c0c14U, 0x140c140cU,
+    0x140c1c04U, 0x140c341cU, 0x140c343eU, 0x140c3e04U, 0x14140404U, 0x14140414U, 0x14140c0cU, 0x14140c3eU,
+    0x14141404U, 0x14141414U, 0x14141c3eU, 0x14142404U, 0x14142c2cU, 0x141c040cU, 0x141c0c04U, 0x141c0c24U,
+    0x141c3e04U, 0x141c3e24U, 0x14241c2cU, 0x14242c1cU, 0x142c041cU, 0x142c143eU, 0x142c240cU, 0x142c3e24U,
+    0x143e040cU, 0x143e041cU, 0x143e0c34U, 0x143e242cU, 0x1c04040cU, 0x1c040c04U, 0x1c040c14U, 0x1c04140cU,
+    0x1c04141cU, 0x1c042c04U, 0x1c04342cU, 0x1c043e14U, 0x1c0c0404U, 0x1c0c0414U, 0x1c0c1404U, 0x1c0c1c0cU,
+    0x1c0c2424U, 0x1c0c2434U, 0x1c14040cU, 0x1c14041cU, 0x1c140c04U, 0x1c14142cU, 0x1c142c14U, 0x1c143e14U,
+    0x1c1c0c0cU, 0x1c1c1c1cU, 0x1c241c04U, 0x1c24243eU, 0x1c243e14U, 0x1c2c0404U, 0x1c2c0434U, 0x1c2c1414U,
+    0x1c2c2c2cU, 0x1c340c24U, 0x1c341c34U, 0x1c34341cU, 0x1c3e1c1cU, 0x1c3e3404U, 0x24040424U, 0x24040c3eU,
+    0x24041c2cU, 0x24041c3eU, 0x24042c1cU, 0x24042c3eU, 0x240c3e24U, 0x24141404U, 0x24141c3eU, 0x24142404U,
+    0x24143404U, 0x24143434U, 0x241c043eU, 0x241c242cU, 0x24240424U, 0x24242c0cU, 0x24243424U, 0x242c142cU,
+    0x242c241cU, 0x242c3e04U, 0x243e042cU, 0x243e0c04U, 0x243e0c14U, 0x243e1c04U, 0x2c040c14U, 0x2c04240cU,
+    0x2c043e04U, 0x2c0c0404U, 0x2c0c0434U, 0x2c0c1434U, 0x2c0c2c2cU, 0x2c140c24U, 0x2c141c14U, 0x2c143e14U,
+    0x2c1c0414U, 0x2c1c2c1cU, 0x2c240c04U, 0x2c24141cU, 0x2c24143eU, 0x2c243e14U, 0x2c2c0414U, 0x2c2c1c0cU,
+    0x2c342c04U, 0x2c3e1424U, 0x2c3e2414U, 0x34041424U, 0x34042424U, 0x34042434U, 0x34043424U, 0x340c140cU,
+    0x340c340cU, 0x34140c3eU, 0x34143424U, 0x341c1c04U, 0x341c1c34U, 0x34242424U, 0x342c042cU, 0x342c2c14U,
+    0x34341c1cU, 0x343e041cU, 0x343e140cU, 0x3e04041cU, 0x3e04042cU, 0x3e04043eU, 0x3e040c04U, 0x3e041c14U,
+    0x3e042c14U, 0x3e0c1434U, 0x3e0c2404U, 0x3e140c14U, 0x3e14242cU, 0x3e142c14U, 0x3e1c0404U, 0x3e1c0c2cU,
+    0x3e1c1c1cU, 0x3e1c3404U, 0x3e24140cU, 0x3e24240cU, 0x3e2c0404U, 0x3e2c0414U, 0x3e2c1424U, 0x3e341c04U,
+};
+
+// opt-iq3xxs: 7-bit index to an 8-bit per-element sign mask (bit j set means
+// element j is negated). Verbatim from ggml-common.h (ksigns_iq2xs).
+__device__ inline constexpr std::uint8_t kDeviceSignsIq2xs[128] = {
+    0, 129, 130, 3, 132, 5, 6, 135, 136, 9, 10, 139, 12, 141, 142, 15,
+    144, 17, 18, 147, 20, 149, 150, 23, 24, 153, 154, 27, 156, 29, 30, 159,
+    160, 33, 34, 163, 36, 165, 166, 39, 40, 169, 170, 43, 172, 45, 46, 175,
+    48, 177, 178, 51, 180, 53, 54, 183, 184, 57, 58, 187, 60, 189, 190, 63,
+    192, 65, 66, 195, 68, 197, 198, 71, 72, 201, 202, 75, 204, 77, 78, 207,
+    80, 209, 210, 83, 212, 85, 86, 215, 216, 89, 90, 219, 92, 221, 222, 95,
+    96, 225, 226, 99, 228, 101, 102, 231, 232, 105, 106, 235, 108, 237, 238, 111,
+    240, 113, 114, 243, 116, 245, 246, 119, 120, 249, 250, 123, 252, 125, 126, 255,
 };
 
 // opt-q4kxl: unpack the sixteen 6-bit biased Q3_K scales from the packed
@@ -663,6 +730,37 @@ __device__ inline void DecodeQuantSub16(core::GgmlType type,
       out.scale = __half2float(blk.d) * static_cast<float>(1 + (2 * nibble));
       return;
     }
+    case core::GgmlType::kIQ3_XXS: {
+      const auto& blk = static_cast<const IQ3XXSBlock*>(row)[sub16 / 16];
+      const std::size_t sb32 = (sub16 / 2) % 8;
+      const std::size_t l0 = (sub16 % 2) * 2;
+      const std::uint32_t aux =
+          static_cast<std::uint32_t>(blk.scales_and_signs[4 * sb32]) |
+          (static_cast<std::uint32_t>(blk.scales_and_signs[(4 * sb32) + 1])
+           << 8U) |
+          (static_cast<std::uint32_t>(blk.scales_and_signs[(4 * sb32) + 2])
+           << 16U) |
+          (static_cast<std::uint32_t>(blk.scales_and_signs[(4 * sb32) + 3])
+           << 24U);
+      out.scale = __half2float(blk.d) *
+                  (0.5F + static_cast<float>(aux >> 28U)) * 0.5F;
+      // Irregular by construction: every group of four elements is a separate
+      // 256-entry grid lookup, so this one stays element-wise like IQ3_S.
+#pragma unroll
+      for (int j = 0; j < 16; ++j) {
+        const std::size_t l = l0 + (static_cast<std::size_t>(j) / 8);
+        const std::size_t jj = static_cast<std::size_t>(j) % 8;
+        const std::size_t half = jj / 4;
+        const std::uint8_t signs = kDeviceSignsIq2xs[(aux >> (7U * l)) & 127U];
+        const auto* grid = reinterpret_cast<const std::uint8_t*>(
+            &kDeviceIq3xxsGrid[blk.qs[(sb32 * 8) + (2 * l) + half]]);
+        const int magnitude = static_cast<int>(grid[jj % 4]);
+        out.q[j] = static_cast<std::int8_t>((signs & (1U << jj)) != 0U
+                                                ? -magnitude
+                                                : magnitude);
+      }
+      return;
+    }
     default:
       break;
   }
@@ -696,7 +794,7 @@ __device__ inline bool IsSub16DecodedQuant(core::GgmlType t) noexcept {
   return t == core::GgmlType::kQ4_K || t == core::GgmlType::kQ5_K ||
          t == core::GgmlType::kQ6_K || t == core::GgmlType::kQ3_K ||
          t == core::GgmlType::kIQ4_NL || t == core::GgmlType::kIQ4_XS ||
-         t == core::GgmlType::kIQ3_S;
+         t == core::GgmlType::kIQ3_S || t == core::GgmlType::kIQ3_XXS;
 }
 
 // opt-r7-decode-parallel: warp-parallel quant row-dot, templated on the input

@@ -121,6 +121,11 @@ public:
   [[nodiscard]] std::size_t GetPackedWeightBytes() const noexcept {
     return packed_weight_bytes_;
   }
+  /// MoE targets carry no exact cold/live continuation contract, so the draft
+  /// may project prompt context on matrix cores.
+  [[nodiscard]] bool TargetIsMoE() const noexcept {
+    return target_model_ != nullptr && target_model_->GetConfig().IsMoE();
+  }
 
 private:
   QwenDFlashGpuModel(std::shared_ptr<const core::GgufReader> dflash_reader,
@@ -353,7 +358,7 @@ public:
   }
   /// The most recent verification has not yet injected these target rows.
   /// Discard them when the target returns to its saved verification frontier.
-  void DiscardPendingTargetContext(std::uint32_t position);
+  void DiscardPendingTargetContext(std::uint32_t position) override;
 
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const noexcept {
     return executor_->GetMemoryUsage();

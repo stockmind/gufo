@@ -8,6 +8,7 @@
 #include "src/models/qwen/continuation_layout.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/hip/mtp.hpp"
 
 namespace gufo::models::qwen {
 
@@ -29,10 +30,14 @@ public:
       hip::QwenExecutionPolicy = hip::QwenExecutionPolicy::Production(),
       std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model = nullptr,
       hip::QwenDFlashGpuDraftConfig draft_config = {},
-      cache::ResourceLedger* ledger = nullptr);
+      cache::ResourceLedger* ledger = nullptr,
+      std::shared_ptr<const hip::QwenMtpGpuModel> mtp_model = nullptr,
+      hip::QwenMtpGpuDraftConfig mtp_config = {});
   ~ContinuationAdapter() override;
   [[nodiscard]] hip::QwenGpuExecutor& GetExecutor(cache::Slot&);
   [[nodiscard]] hip::QwenDFlashGpuDraftBackend* GetDraftBackend(cache::Slot&);
+  [[nodiscard]] hip::QwenMtpGpuDraftBackend* GetMtpDraftBackend(cache::Slot&);
+  [[nodiscard]] speculative::IDraftBackend* GetDraft(cache::Slot&);
   [[nodiscard]] ContinuationFrontier& GetFrontier(cache::Slot&);
   // A next-token frontier with logits from the last executed position. A
   // partial-prefill restore carries a placeholder token without logits.
@@ -109,6 +114,8 @@ private:
   std::shared_ptr<const hip::QwenGpuModel> model_;
   std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model_;
   hip::QwenDFlashGpuDraftConfig draft_config_;
+  std::shared_ptr<const hip::QwenMtpGpuModel> mtp_model_;
+  hip::QwenMtpGpuDraftConfig mtp_config_;
   // Charged for each slot's pinned prompt capture; outlives the slots.
   cache::ResourceLedger* ledger_;
   std::atomic<std::size_t> pinned_capture_bytes_{};
