@@ -63,6 +63,41 @@ private:
   double pack_time_seconds_{0.0};
 };
 
+/// Immutable GPU-visible copy of an MTP draft continuation. Mirrors the
+/// DFlash snapshot so the generic speculative verifier can fork and persist
+/// MTP draft KV.
+class QwenMtpGpuSnapshot final {
+public:
+  ~QwenMtpGpuSnapshot();
+
+  QwenMtpGpuSnapshot(const QwenMtpGpuSnapshot&) = delete;
+  QwenMtpGpuSnapshot& operator=(const QwenMtpGpuSnapshot&) = delete;
+  QwenMtpGpuSnapshot(QwenMtpGpuSnapshot&&) = delete;
+  QwenMtpGpuSnapshot& operator=(QwenMtpGpuSnapshot&&) = delete;
+
+  [[nodiscard]] std::size_t PayloadBytes() const noexcept {
+    return payload_bytes_;
+  }
+  [[nodiscard]] std::uint32_t ValidContext() const noexcept {
+    return valid_context_;
+  }
+  [[nodiscard]] std::size_t PersistentPayloadBytes() const;
+  [[nodiscard]] std::size_t SerializePersistent(
+      std::span<std::uint8_t> destination) const;
+
+private:
+  QwenMtpGpuSnapshot() = default;
+
+  void* d_kv_f32_{nullptr};
+  void* d_kv_f16_{nullptr};
+  std::size_t kv_width_{0};
+  std::uint32_t max_context_{0};
+  std::uint32_t valid_context_{0};
+  std::size_t payload_bytes_{0};
+
+  friend class QwenMtpGpuExecutor;
+};
+
 /// Mutable single-session executor for the Qwen3.8 layer-64 MTP graph.
 class QwenMtpGpuExecutor final {
 public:
@@ -97,6 +132,20 @@ public:
   [[nodiscard]] std::span<const float> CopyLastHidden();
   [[nodiscard]] std::span<const float> CopyLastLogits();
 
+  /// Exact bytes SaveSnapshot() allocates at the current executed frontier.
+  [[nodiscard]] std::size_t SnapshotPayloadBytes() const noexcept;
+  [[nodiscard]] std::unique_ptr<QwenMtpGpuSnapshot> SaveSnapshot() const;
+  void RestoreSnapshot(const QwenMtpGpuSnapshot& snapshot);
+  void RestorePersistentSnapshot(std::span<const std::uint8_t> payload);
+
+  /// Runs one MTP step and returns the host copy of the full vocabulary
+  /// logits, for host-side sampled proposal construction.
+  [[nodiscard]] std::span<const float> ForwardTargetHiddenLogits(
+      tokenization::TokenId input_token, std::span<const float> target_hidden,
+      std::uint32_t position);
+  [[nodiscard]] std::span<const float> ForwardFeedbackLogits(
+      tokenization::TokenId input_token, std::uint32_t position);
+
   [[nodiscard]] std::uint32_t GetNextPosition() const noexcept {
     return next_position_;
   }
@@ -106,6 +155,12 @@ public:
   [[nodiscard]] std::size_t GetHiddenSize() const noexcept {
     return model_->GetConfig().hidden_size;
   }
+  [[nodiscard]] std::uint32_t GetVocabSize() const noexcept {
+    return model_->GetConfig().vocab_size;
+  }
+  [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const noexcept;
+  [[nodiscard]] static QwenGpuMemoryUsage EstimateMemoryUsage(
+      const QwenMtpGpuModel& model, std::uint32_t max_context) noexcept;
 
 private:
   QwenMtpGpuExecutor(std::shared_ptr<const QwenMtpGpuModel> model,
@@ -143,6 +198,9 @@ private:
   void* d_kv_cache_f16_{nullptr};
   float* d_split_k_scratch_{nullptr};
   std::uint32_t* d_out_token_{nullptr};
+  // One-token MoE FFN scratch; allocated only for MoE targets.
+  std::uint8_t* d_moe_{nullptr};
+  QwenMoeScratch moe_{};
 
   models::qwen::vision::DeviceInput* vision_input_{
       nullptr};  // owned by the target session
@@ -185,12 +243,31 @@ public:
   [[nodiscard]] speculative::DraftProposal Propose(
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t current_pos, std::uint32_t max_tokens) override;
+  [[nodiscard]] speculative::DraftProposal ProposeSampled(
+      std::span<const tokenization::TokenId> prompt_tokens,
+      std::uint32_t current_pos, std::uint32_t max_tokens, float temperature,
+      std::uint64_t* rng_state) override;
+  [[nodiscard]] bool SupportsSampledProposals() const noexcept override {
+    return true;
+  }
 
   void AcceptFeedback(std::span<const tokenization::TokenId> accepted,
                       tokenization::TokenId correction_token) override;
 
   void UpdateTargetHidden(std::span<const float> hidden) override;
+  void DiscardPendingTargetContext(std::uint32_t position) override;
   void Reset() noexcept override;
+
+  [[nodiscard]] std::size_t SnapshotPayloadBytes() const override;
+  [[nodiscard]] std::unique_ptr<speculative::IDraftBackendSnapshot> Snapshot()
+      const override;
+  void RestoreSnapshot(
+      const speculative::IDraftBackendSnapshot& snapshot) override;
+  void RestorePersistentSnapshot(std::span<const std::uint8_t> payload) override;
+
+  [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const noexcept {
+    return executor_->GetMemoryUsage();
+  }
 
   [[nodiscard]] const std::string& GetLastError() const noexcept {
     return last_error_;
@@ -205,6 +282,7 @@ private:
   std::vector<float> target_hidden_;
   std::vector<float> proposal_target_hidden_;
   std::vector<float> committed_target_hidden_;
+  std::vector<float> last_anchor_hidden_;
   std::vector<tokenization::TokenId> proposed_tokens_;
   tokenization::TokenId proposal_input_{0};
   std::uint32_t proposal_checkpoint_{0};

@@ -41,8 +41,8 @@ void TestFormatCapabilities() {
       GgmlType::kQ8_0,   GgmlType::kQ8_1,  GgmlType::kQ2_K,
       GgmlType::kQ3_K,   GgmlType::kQ4_K,  GgmlType::kQ5_K,
       GgmlType::kQ6_K,   GgmlType::kQ8_K,  GgmlType::kIQ2_XXS,
-      GgmlType::kIQ4_NL, GgmlType::kIQ3_S, GgmlType::kIQ4_XS,
-      GgmlType::kBF16,
+      GgmlType::kIQ4_NL, GgmlType::kIQ3_S, GgmlType::kIQ3_XXS,
+      GgmlType::kIQ4_XS, GgmlType::kBF16,
   };
   for (const auto type : all_types) {
     const auto descriptor = DescribeQwenGemmFormat(type);
@@ -84,7 +84,8 @@ void TestFormatCapabilities() {
   // all of them are direct on both GPU paths. Q4_K in particular used to be
   // CPU-only.
   for (const auto type : {GgmlType::kQ4_K, GgmlType::kQ3_K, GgmlType::kIQ4_NL,
-                          GgmlType::kIQ4_XS, GgmlType::kIQ3_S}) {
+                          GgmlType::kIQ4_XS, GgmlType::kIQ3_S,
+                          GgmlType::kIQ3_XXS}) {
     Check(DescribeQwenGemmFormat(type).quantized,
           "mixed low-bit format is quantized");
     Check(DescribeQwenGemmFormat(type).cpu_direct, "mixed low-bit CPU support");

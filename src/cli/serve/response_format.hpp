@@ -10,6 +10,28 @@
 
 namespace gufo::server {
 
+// Dialect markers such as "$schema" (emitted by Zod/LangChain JSON-schema
+// converters) describe the schema document, not the constrained output, and
+// have no grammar. Drop them recursively so OpenAI-compatible clients are not
+// rejected for harmless metadata.
+inline json::Value WithoutDialectMarkers(const json::Value& value) {
+  if (value.is_array()) {
+    auto out = json::Value::array();
+    for (const auto& item : value.items())
+      out.push_back(WithoutDialectMarkers(item));
+    return out;
+  }
+  if (!value.is_object())
+    return value;
+  auto out = json::Value::object();
+  for (const auto& [key, member] : value.members()) {
+    if (key == "$schema" || key == "$id" || key == "$comment")
+      continue;
+    out.append_member(key, WithoutDialectMarkers(member));
+  }
+  return out;
+}
+
 // Chat Completions wire contract:
 // https://developers.openai.com/api/docs/guides/structured-outputs
 inline std::shared_ptr<const sampling::JsonConstraint> ParseResponseFormat(
@@ -66,8 +88,9 @@ inline std::shared_ptr<const sampling::JsonConstraint> ParseResponseFormat(
   const auto* schema = specification->find("schema");
   if (!schema)
     invalid("json_schema.schema is required");
-  return sampling::JsonConstraint::Compile(*schema, strict && strict->as_bool(),
-                                           true);
+  const auto normalized = WithoutDialectMarkers(*schema);
+  return sampling::JsonConstraint::Compile(normalized,
+                                           strict && strict->as_bool(), true);
 }
 }  // namespace gufo::server
 
