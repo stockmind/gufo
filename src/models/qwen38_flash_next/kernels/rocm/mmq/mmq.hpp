@@ -2806,15 +2806,28 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         for (int l = 0; l < QR2_S; ++l) {
             const int * grid_pos = (const int *)(iq2s_grid + (qs[l] | ((qh << (8-2*l)) & 0x300)));
 
-            const int signs0 = __vcmpne4(((signs_packed_8[l] & 0x03) << 7) | ((signs_packed_8[l] & 0x0C) << 21), 0x00000000);
-            const int signs1 = __vcmpne4(((signs_packed_8[l] & 0x30) << 3) | ((signs_packed_8[l] & 0xC0) << 17), 0x00000000);
-
-            const int grid_l = __vsub4(grid_pos[0] ^ signs0, signs0);
-            const int grid_h = __vsub4(grid_pos[1] ^ signs1, signs1);
+            // Per-byte two's-complement sign application. The grid bytes are
+            // nonzero (0x08/0x19/0x2b), so the carry from +1 cannot leak into
+            // the neighbouring byte and (g ^ 0xFF) + 1 == -g bytewise. The
+            // sign byte packs the low group's four element flags in bits 0..3
+            // and the high group's in bits 4..7; build 0x01 per negative byte
+            // with shifts, replacing the vcmpne4 pair plus vsub4.
+            const uint32_t sb = signs_packed_8[l];
+            const uint32_t add_l = ((sb >> 0) & 1u) | (((sb >> 1) & 1u) << 8) |
+                                   (((sb >> 2) & 1u) << 16) | (((sb >> 3) & 1u) << 24);
+            const uint32_t add_h = ((sb >> 4) & 1u) | (((sb >> 5) & 1u) << 8) |
+                                   (((sb >> 6) & 1u) << 16) | (((sb >> 7) & 1u) << 24);
+            const int grid_l = static_cast<int>((static_cast<uint32_t>(grid_pos[0]) ^ (add_l * 0xffu)) + add_l);
+            const int grid_h = static_cast<int>((static_cast<uint32_t>(grid_pos[1]) ^ (add_h * 0xffu)) + add_h);
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-            x_qs[i*MMQ_MMA_TILE_X_K_Q3_K + 8*kqsx + (2*l + 0)] = grid_l;
-            x_qs[i*MMQ_MMA_TILE_X_K_Q3_K + 8*kqsx + (2*l + 1)] = grid_h;
+            // One 8-byte LDS store. Left as two scalar stores the compiler
+            // pairs them into a 64-dword-strided ds_store_2addr, whose two
+            // addresses land on the same of the 32 banks and self-conflict
+            // on gfx1151; the pair is always 8-byte aligned here.
+            *reinterpret_cast<int2 *>(
+                &x_qs[i*MMQ_MMA_TILE_X_K_Q3_K + 8*kqsx + 2*l]) =
+                    make_int2(grid_l, grid_h);
 #else
             x_qs[i*(2*MMQ_TILE_NE_K + 1) + 8*kqsx + (2*l + 0)] = grid_l;
             x_qs[i*(2*MMQ_TILE_NE_K + 1) + 8*kqsx + (2*l + 1)] = grid_h;
@@ -2824,8 +2837,9 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         const int ls = bxi->scales[kqsx];
         const float d = bxi->d;
 #if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-        x_df[i*MMQ_MMA_TILE_X_K_Q3_K                   + 2*kqsx+0] = ((ls &  0x0F)*d + d/2)/4;
-        x_df[i*MMQ_MMA_TILE_X_K_Q3_K                   + 2*kqsx+1] = ((ls >>    4)*d + d/2)/4;
+        *reinterpret_cast<float2 *>(
+            &x_df[i*MMQ_MMA_TILE_X_K_Q3_K + 2*kqsx]) =
+                make_float2(((ls & 0x0F)*d + d/2)/4, ((ls >> 4)*d + d/2)/4);
 #else
         x_df[i*(2*MMQ_TILE_NE_K*2/QI8_0) + i/(QI8_0/4) + 2*kqsx+0] = ((ls &  0x0F)*d + d/2)/4;
         x_df[i*(2*MMQ_TILE_NE_K*2/QI8_0) + i/(QI8_0/4) + 2*kqsx+1] = ((ls >>    4)*d + d/2)/4;
@@ -2877,8 +2891,9 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
             const int grid_h = __vsub4(grid_pos.y ^ signs1, signs1);
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-            x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + (2*l + 0)] = grid_l;
-            x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + (2*l + 1)] = grid_h;
+            *reinterpret_cast<int2 *>(
+                &x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + 2*l]) =
+                    make_int2(grid_l, grid_h);
 #else
             x_qs[i*(2*MMQ_TILE_NE_K + 1) + 8*kqsx + (2*l + 0)] = grid_l;
             x_qs[i*(2*MMQ_TILE_NE_K + 1) + 8*kqsx + (2*l + 1)] = grid_h;
@@ -2944,8 +2959,9 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
             const int grid_h = __vsub4(grid_pos.y ^ signs1, signs1);
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-            x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + (2*l+0)] = grid_l;
-            x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + (2*l+1)] = grid_h;
+            *reinterpret_cast<int2 *>(
+                &x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + 2*l]) =
+                    make_int2(grid_l, grid_h);
 #else
             x_qs[i*(2*MMQ_TILE_NE_K + 1) + 8*kqsx + (2*l+0)] = grid_l;
             x_qs[i*(2*MMQ_TILE_NE_K + 1) + 8*kqsx + (2*l+1)] = grid_h;
@@ -3040,12 +3056,20 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     constexpr int nrows = warp_size / threads_per_row;
     const int kqsx = threadIdx.x % threads_per_row;
 
+    // Two grid lookups are in flight per thread on gfx1151; the packed IQ2_S
+    // rows are read from DRAM and the grid indirection makes the latency hard
+    // to hide otherwise. Same iteration set and per-row arithmetic.
+#if defined(__gfx1151__)
+#pragma unroll 2
+#else
 #pragma unroll
-    for (int i0 = 0; i0 < mmq_y; i0 += nrows*nwarps) {
-        int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
+#endif
+    for (int i0 = 0; i0 < mmq_y; i0 += nwarps * nrows) {
+        int i = i0 + threadIdx.y*nrows + threadIdx.x/threads_per_row;
 
         if (need_check) {
             i = min(i, i_max);
+
         }
 
         const block_iq4_xs * bxi = (const block_iq4_xs *) x + kbx0 + i*stride;

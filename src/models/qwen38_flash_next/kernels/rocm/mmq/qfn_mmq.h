@@ -71,9 +71,26 @@ int qfn_mmq_build_ids_maps(
         int n_experts, int n_tokens, int n_expert_used, int nchannels_y, int si1, int sis1, hipStream_t stream);
 
 int qfn_mmq_q8_0_moe_raw(
-    const void * W, const float * X_f32, const int32_t * ids, float * out,
+    const void * W, const float * X, const int32_t * ids, float * out,
     int M, int K, int n_tokens, int n_experts, int n_expert_used,
     hipStream_t stream);
+
+// Paired variant sharing one activation quantization; both weights use the
+// same shape and routing, and both outputs are [n_tokens*n_expert_used][M].
+int qfn_mmq_q8_0_moe_pair(
+    const void * W_a, const void * W_b, const float * X, const int32_t * ids,
+    float * out_a, float * out_b, int M, int K, int n_tokens, int n_experts,
+    int n_expert_used, hipStream_t stream);
+
+int qfn_mmq_q6_K_moe_raw(
+    const void * W, const float * X, const int32_t * ids, float * out,
+    int M, int K, int n_tokens, int n_experts, int n_expert_used,
+    hipStream_t stream);
+
+int qfn_mmq_q6_K_moe_pair(
+    const void * W_a, const void * W_b, const float * X, const int32_t * ids,
+    float * out_a, float * out_b, int M, int K, int n_tokens, int n_experts,
+    int n_expert_used, hipStream_t stream);
 
 int qfn_mmq_q4_K_moe_raw(
     const void * W, const float * X_f32, const int32_t * ids, float * out,
@@ -89,5 +106,27 @@ int qfn_mmq_q5_K_moe_raw(
     const void * W, const float * X_f32, const int32_t * ids, float * out,
     int M, int K, int n_tokens, int n_experts, int n_expert_used,
     hipStream_t stream);
+
+// Generic routed-expert projection for GGML IQ2_S / IQ3_XXS / IQ3_S / IQ4_NL.
+int qfn_mmq_moe_raw(int weight_type, const void* W, const float* X_f32,
+                    const int32_t* ids, float* out, int M, int K, int n_tokens,
+                    int n_experts, int n_expert_used, hipStream_t stream);
+
+// Paired routed-expert projections over one id map and one activation
+// quantization: both weights share shape, routing and input, so gate/up run
+// back to back without rebuilding the gather map or re-quantizing.
+int qfn_mmq_moe_pair(int weight_type, const void* W_a, const void* W_b,
+                     const float* X_f32, const int32_t* ids, float* out_a,
+                     float* out_b, int M, int K, int n_tokens, int n_experts,
+                     int n_expert_used, hipStream_t stream);
+
+// Generic dense projection out[N][M] = X[N][K] * W[M][K]^T for the low-bit
+// quantized formats, running through the WMMA MMQ.
+int qfn_mmq_dense(int weight_type, const void* W, const float* X, float* out,
+                  int M, int N, int K, hipStream_t stream);
+
+// Decode-time GEMV over Q8_1 activations for the same quantized formats.
+int qfn_mmq_dense_vec(int weight_type, const void* W, const void* X_q8,
+                      float* out, int M, int N, int K, hipStream_t stream);
 
 }

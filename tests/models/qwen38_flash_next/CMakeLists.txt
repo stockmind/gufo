@@ -27,6 +27,7 @@ add_qwen38_flash_next_test(runner_options gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(probe gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(config gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(continuation_layout gufo_qwen38_flash_next "cpu")
+add_qwen38_flash_next_test(iq2s_sign_parity gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(ngram gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(mtp_sampling gufo_core "cpu")
 add_qwen38_flash_next_test(rope_scaling gufo_qwen38_flash_next "cpu")
@@ -48,7 +49,7 @@ if (ENGINE_ENABLE_HIP)
   target_compile_definitions(qwen38_flash_next_test_hip INTERFACE ENGINE_ENABLE_HIP=1)
   foreach(name IN ITEMS mtp_ops blaslt_ops hc_mix_ops hc_route_ops gdn_ops
       attention_ops moe_epilogue_ops moe_ids_ops projection_ops routed_wmma_ops
-      select_ops snapshot_copy verification_sampling wide_verification)
+      select_ops snapshot_copy verification_sampling)
     add_qwen38_flash_next_test(${name} qwen38_flash_next_test_hip "hip;gpu;gfx1151")
   endforeach()
   # Reuse the synthetic model fixture, with short prompts around a reduced

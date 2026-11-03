@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 
@@ -23,6 +24,25 @@ namespace {
 /// over-read stays inside the allocation (the extra bytes meet zeroed
 /// activation padding and contribute nothing).
 constexpr std::size_t kTailMargin = 4096;
+
+/// Formats whose rows can be concatenated verbatim into one device tensor and
+/// decoded in place by the small-matrix / embedding kernels.
+bool IsStackQuant(core::GgmlType type) {
+  switch (type) {
+    case core::GgmlType::kQ5_1:
+    case core::GgmlType::kQ4_K:
+    case core::GgmlType::kQ5_K:
+    case core::GgmlType::kQ6_K:
+    case core::GgmlType::kIQ4_NL:
+    case core::GgmlType::kIQ4_XS:
+    case core::GgmlType::kIQ3_XXS:
+    case core::GgmlType::kIQ3_S:
+    case core::GgmlType::kIQ2_S:
+      return true;
+    default:
+      return false;
+  }
+}
 
 struct Conversion {
   void* source;
@@ -75,6 +95,53 @@ struct Uploader {
     return weights->Allocate(pointer, size);
   }
 
+  // Flash-Next consumes a few weights directly as F32 (the PLE conv). Some
+  // artifacts store them as F16/BF16; widen on the host before upload.
+  DeviceTensor Widen(const TensorRef& t) {
+    if (t.empty() || (t.type != core::GgmlType::kF16 &&
+                      t.type != core::GgmlType::kBF16)) {
+      return Copy(t);
+    }
+    const std::size_t n = t.SizeBytes() / 2;
+    std::vector<float> tmp(n);
+    const auto* src = static_cast<const std::uint16_t*>(t.data);
+    for (std::size_t i = 0; i < n; ++i) {
+      if (t.type == core::GgmlType::kF16) {
+        tmp[i] = gufo::quant::Fp16ToFloat(src[i]);
+      } else {
+        const std::uint32_t u = static_cast<std::uint32_t>(src[i]) << 16U;
+        std::memcpy(&tmp[i], &u, sizeof(float));
+      }
+    }
+    DeviceTensor d;
+    if (!ok) {
+      return d;
+    }
+    const std::size_t size = n * sizeof(float);
+    void* ptr = nullptr;
+    if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
+      Fail("device allocation failed for widened tensor");
+      return d;
+    }
+    if (Measuring()) {
+      return d;
+    }
+    allocations.push_back(ptr);
+    bytes += size + kTailMargin;
+    if (hipMemcpy(ptr, tmp.data(), size, hipMemcpyHostToDevice) != hipSuccess) {
+      Fail("widen upload failed");
+      return d;
+    }
+    (void)hipMemsetAsync(static_cast<std::uint8_t*>(ptr) + size, 0, kTailMargin,
+                         nullptr);
+    d.data = ptr;
+    d.type = core::GgmlType::kF32;
+    d.cols = static_cast<std::uint32_t>(t.cols);
+    d.rows = static_cast<std::uint32_t>(t.rows);
+    d.experts = static_cast<std::uint32_t>(t.experts);
+    return d;
+  }
+
   DeviceTensor Copy(const TensorRef& t) {
     DeviceTensor d;
     if (t.empty() || !ok) {
@@ -109,6 +176,11 @@ struct Uploader {
     }
     if (t.type == core::GgmlType::kQ8_0 && t.experts == 1) {
       max_q8_cols = std::max<std::size_t>(max_q8_cols, t.cols);
+    }
+    // Dense Q6_K runs on the F16 WMMA tier at wide batch, so its activation
+    // staging width must be covered by the F16 buffer.
+    if (t.type == core::GgmlType::kQ6_K && t.experts == 1) {
+      max_half_cols = std::max<std::size_t>(max_half_cols, t.cols);
     }
     return d;
   }
@@ -242,8 +314,9 @@ struct Uploader {
     const core::GgmlType type = (*parts.begin())->type;
     for (const TensorRef* t : parts) {
       if (t->empty() || t->type != type || t->cols != (*parts.begin())->cols ||
-          (type != core::GgmlType::kF32 && type != core::GgmlType::kQ8_0)) {
-        Fail("stacked upload needs F32 or Q8_0 tensors of one shape");
+          (type != core::GgmlType::kF32 && type != core::GgmlType::kQ8_0 &&
+           !IsStackQuant(type))) {
+        Fail("stacked upload needs same-shape F32, Q8_0 or quantized tensors");
         return d;
       }
       rows += t->rows;
@@ -278,6 +351,15 @@ struct Uploader {
       d.cols = static_cast<std::uint32_t>((*parts.begin())->cols);
       d.rows = static_cast<std::uint32_t>(rows);
       max_q8_cols = std::max<std::size_t>(max_q8_cols, d.cols);
+      return d;
+    }
+    if (IsStackQuant(type)) {
+      (void)hipMemsetAsync(static_cast<std::uint8_t*>(ptr) + size, 0,
+                           kTailMargin, nullptr);
+      d.data = ptr;
+      d.type = type;
+      d.cols = static_cast<std::uint32_t>((*parts.begin())->cols);
+      d.rows = static_cast<std::uint32_t>(rows);
       return d;
     }
     void* f32 = ptr;
@@ -373,7 +455,7 @@ struct Uploader {
     d.ple_norm_key = Copy(l.ple_norm_key);
     d.ple_norm_query = Copy(l.ple_norm_query);
     d.ple_norm_conv = Copy(l.ple_norm_conv);
-    d.ple_conv1d = Copy(l.ple_conv1d);
+    d.ple_conv1d = Widen(l.ple_conv1d);
     d.router = Stack({&l.router, &l.shexp_gate_inp});
     d.ffn_gate_exps = Copy(l.ffn_gate_exps);
     d.ffn_up_exps = Copy(l.ffn_up_exps);
@@ -474,15 +556,10 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const ModelWeights& w, const core::GgufReader& reader,
     const MtpWeights* mtp, const core::GgufReader* mtp_reader,
     std::string* error_msg) {
-  // The CPU reference also reads Q6_K, but the production embedding, dense
-  // and routed kernels do not. Reject it before allocating device weights.
-  const auto supported = [&](const TensorRef& t) {
-    if (t.type != core::GgmlType::kQ6_K)
-      return true;
-    if (error_msg != nullptr)
-      *error_msg = "unsupported HIP tensor format Q6_K: " + std::string(t.name);
-    return false;
-  };
+  // The binder already restricts every tensor to a format the runtime can
+  // decode. Q6_K is now read by the embedding (RowElement) and small-matrix
+  // (SmallGemm) kernels, so no per-format rejection is needed here.
+  const auto supported = [&](const TensorRef&) { return true; };
   const auto layer_supported = [&](const LayerWeights& l) {
     return supported(l.ffn_gate_exps) && supported(l.ffn_up_exps) &&
            supported(l.ffn_down_exps);
