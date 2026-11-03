@@ -1,32 +1,5 @@
 # Qwen3.8 Flash-Next experiments
 
-## Wide prompt-lookup verification (November 1, 2026)
-
-Measured downstream, on a fork that runs Swift 1.5 IQ4_XS with its Q8_0 MTP
-head (formats main does not load): Strix Halo gfx1151, ROCm 7.2.4, 120 W
-package limit, `--sessions 8`, HTTP streaming, thinking off, one fresh server
-per build, both builds in one block. Rewrites re-emit a file from the prompt.
-Client decode tok/s:
-
-| Workload | Before | After | Verifications |
-| --- | ---: | ---: | ---: |
-| 220-line Python file, rename (2,222 tokens), greedy | 124.1 | 187.9 | 280 → 53 |
-| same file, add docstrings, greedy | 122.4 | 186.9 | 286 → 54 |
-| same file, add return hints, greedy | 123.5 | 194.4 | 279 → 41 |
-| 150-line C++ header, rename (1,675 tokens), greedy | 124.1 | 186.5 | 212 → 41 |
-| SEARCH/REPLACE blocks (1,122 tokens), greedy | 106.4 | 119.9 | 159 → 104 |
-| lines 60–160 of a line-numbered listing, greedy | 88.9 | 89.0 | 185 → 185 |
-| prose / code / Czech, 512 tokens, greedy | 66.5 / 83.6 / 57.6 | 66.3 / 83.4 / 57.6 | unchanged |
-| Python rename, temperature 1, unseeded | 123.9 | 182.9 | 280 → 58 |
-| Python rename, eight requests (aggregate) | 206.0 | 205.7 | unchanged |
-
-Every greedy output, alone, staggered and eight-way, is byte-identical.
-
-| Variant | Outcome |
-| --- | --- |
-| 32-row limit | Rejected: the four rewrites ran at 157–174 tok/s against 186–195 at 64 in the same block. |
-| Double the width after one whole copy | Rejected: copies of the line-numbered listing break at every line number, so doubled copies wasted rows (87.9 → 85.1 tok/s). Two whole copies in a row: 89.0–89.2. |
-
 ## Routed prefill experts (October 23, 2026)
 
 | Experiment | Outcome |
@@ -412,6 +385,15 @@ limitations. Raw requests, profiles and rejected controls remain outside Git.
 | Batched decode mixers, residual epilogues and MTP norms | Retained; each request keeps its scalar reduction and private state; exact C2/C4/C6/C8 logits, acceptance and RNG. |
 | HC Q8 weight prefetch | Retained for 1–8 rows of the 320×10240 projection; exact original products/FMA order, no extra allocation. |
 | Q4 shared-expert weight reuse | Retained with a separate compact kernel for single-request experts; faster repetitive C1/C4/C8, no mixed-work regression, exact projection/model replay. |
+| Dense Q6_K on the F16 WMMA tier (in-LDS dequant) | Retained for the UD-IQ3_XXS path only. Dense Q6_K (`ssm_out`, `attn_q`, `attn_output`, `shexp_*`) dequantizes to F16 inside `DenseF16GEMMKernel`'s LDS commit, keeping the compact 210 B/256 weights instead of a materialized F16 copy. d0 pp2048 752-759 → 806-823 tok/s (+7-9%); decode keeps the Q6_K GEMV/MMQ. The Q4_K_XL target stores these as Q8_0 and already used the F16 route, so it is unchanged. Materialized F16 aliases of the same weights were rejected (2.4x bytes, pp 752 → 536). |
+| Q6_K dense GEMV for small-row decode | Retained; one warp per row for the rows ≤ 4096 dense Q6_K (small-row) path, reading each weight block once across the verification batch. tg128 MTP 39.6 → ~40.8-41.1 tok/s; routing the large-row dense Q6_K (≥ 8192) to GEMV instead regressed (39.6 → 32). |
+| 8-byte LDS stores in the i-quant MMQ loaders | Retained; `load_tiles_iq2_s`/`iq3_xxs`/`iq3_s` commit each grid pair as one `int2` instead of two `ds_store_2addr` dwords that self-conflict on gfx1151. Bit-exact; throughput-neutral on this model. |
+| Shared gather map and activation quant for prefill expert gate/up | Retained; `qfn_mmq_moe_pair` runs both i-quant projections over one id map and one quantization. Bit-exact; pp2048 ~752 → ~760 (within noise). |
+| IQ2_S aligned-SoA decode artifact | Rejected. The plan was to rewrite each 256-element block into host-resolved magnitude/sign words so the GEMV drops the 1024-entry grid lookup, as the DeepSeek IQ2_XXS `x_soa` path does. It does not fit: the RW artifact is ~1.27x the packed bytes (magnitude + sign + scale words) and must be resident for the expert gate/up tensors, which exceeds the UMA budget, and the decode win cannot pay for re-materializing it per layer if paged. Kept only the packed IQ2_S path. |
+| Depth-2 unroll of the IQ2_S MMQ grid loop | Retained; two grid lookups in flight per thread on gfx1151, same iteration set. Bit-exact; pp2048 ~810 → ~821 (within ±18 noise). |
+| Q6_K output head on the dedicated GEMV at decode | Retained. The vocabulary head (`output.weight`, Q6_K 2560×248320) is one logits row over 248320 rows at decode; the narrowest MMQ tile (16 columns) computed fifteen dead columns and was the single hottest decode kernel (494 ms per forward session). Routed to `mul_mat_vec_q6_K` for N≤8. Per-forward head time 224 → 140 ms; tg128 MTP 34.7 → 35.5 tok/s (two runs, identical acceptance 69/115). Bounding the rule to `rows > 65536` was slower (tg 34.9), so the mid-size Q6_K dense stay on the GEMV as well. |
+| Byte-wise IQ2_S sign application in the MMQ loader | Retained; the packed decoder's `vcmpne4` mask pair plus `vsub4` is replaced by the byte-wise two's-complement identity `(g ^ (add*0xff)) + add`, which is exact because every grid byte is nonzero so the +1 cannot carry. Verified equal over all magnitudes and sign bytes (`iq2s_sign_parity_test`). pp2048 ~821 → ~824 (within ±19 noise); the bound is the 1024-entry grid lookup itself (~40 billion lookups per forward, 24 GB/s achieved against a ~256 GB/s ceiling), not the sign arithmetic. |
+| LDS-staged i-quant decode grids in the MMQ loader | Rejected. Staging the iq2s (8 KiB) / iq3xxs (1 KiB) / iq3s (2 KiB) grids in the tail of the shared tile and reading the loader gather from LDS instead of the `__device__` table (one cooperative copy plus barrier per workgroup) is a consistent regression on UD-IQ3_XXS, interleaved A/B against the same revision: pp512 740.4 → 713.4 (**−3.6%**, sub-1 tok/s spread) and pp2048 844.6 → 821.2 (−2.8%). The table is tiny and already L1-served, so the gather was not the limiter; the extra LDS traffic and barrier contend with the x-tile stores. Bit-exact; reverted. |
 | Q5 high-bit expansion | Retained; exact integer multiply/mask replaces repeated shifts, with unchanged dot products and faster serving. |
 | Short convolution/history fusion | Retained for 1–8 tokens; exact output, rolling state and rollback snapshots, fewer launches and no additional allocation. |
 | Batched GDN recurrence | Retained; private ragged state/rollback rows, cancellation isolation and exact session replay. Helps shallow batches most; end-to-end gains are modest. |

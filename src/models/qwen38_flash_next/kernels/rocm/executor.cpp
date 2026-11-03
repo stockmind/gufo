@@ -71,9 +71,57 @@ WeightType SmallType(GgmlType type) {
       return WeightType::kQ8_0;
     case GgmlType::kF32:
       return WeightType::kF32;
+    case GgmlType::kQ5_1:
+      return WeightType::kQ5_1;
+    case GgmlType::kQ4_K:
+      return WeightType::kQ4_K;
+    case GgmlType::kQ5_K:
+      return WeightType::kQ5_K;
+    case GgmlType::kQ6_K:
+      return WeightType::kQ6_K;
+    case GgmlType::kIQ4_NL:
+      return WeightType::kIQ4_NL;
+    case GgmlType::kIQ4_XS:
+      return WeightType::kIQ4_XS;
+    case GgmlType::kIQ3_XXS:
+      return WeightType::kIQ3_XXS;
+    case GgmlType::kIQ3_S:
+      return WeightType::kIQ3_S;
+    case GgmlType::kIQ2_S:
+      return WeightType::kIQ2_S;
     default:
       throw std::logic_error("unsupported Flash-Next matrix format");
   }
+}
+
+/// True for the packed formats the small-matrix (SmallGemm) decode path can
+/// read directly. These are always routed through SmallGemm, including at
+/// prefill widths where the unquantized projections use hipBLAS.
+bool IsSmallQuantFormat(GgmlType type) {
+  return type == GgmlType::kQ5_1 || type == GgmlType::kQ4_K ||
+         type == GgmlType::kQ5_K || type == GgmlType::kQ6_K ||
+         type == GgmlType::kIQ4_NL || type == GgmlType::kIQ4_XS ||
+         type == GgmlType::kIQ3_XXS || type == GgmlType::kIQ3_S ||
+         type == GgmlType::kIQ2_S;
+}
+
+/// Decode GEMV row limit for the packed formats. At N=1 the tiled MMQ wastes
+/// all but one column, so the row-wise GEMV is preferred regardless of row
+/// count; formats are enabled past the validated 4096-row floor as their
+/// dedicated kernels land.
+bool DenseVecWanted(GgmlType type, std::uint32_t rows) {
+  (void)type;
+  return rows <= 4096;
+}
+
+/// True when a large-row Q6_K dense matrix should use the dedicated warp-per-
+/// row GEMV instead of an N<=8 MMQ tile. The output head is the case that
+/// matters: one logits row over 248320 rows, where a 16-wide MMQ tile computes
+/// fifteen dead columns. Bounded to N<=8 so every row's K reduction matches the
+/// small-row GEMV, and to the exactly-divisible 256-multiple K.
+bool DenseQ6KGemvWanted(const DeviceTensor& w, std::uint32_t n_tokens) {
+  return w.type == GgmlType::kQ6_K && w.experts == 1 && n_tokens <= 8 &&
+         w.cols % 256 == 0;
 }
 
 // The tier's tiled kernels compute whole column tiles; below this width the
@@ -926,9 +974,6 @@ Executor::~Executor() {
     (void)ngram_->WaitRead();
   }
   (void)hipFree(batch_logits_);
-  (void)hipFree(wide_controls_);
-  for (float* p : wide_allocations_)
-    (void)hipFree(p);
   (void)hipFree(verification_penalties_);
   for (void* p : allocations_) {
     (void)hipFree(p);
@@ -1342,13 +1387,9 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
   }
   s->control_ = Alloc<Session::Control>(a, 1, error_msg, &s->allocated_bytes_);
   if (s->mtp_enabled_) {
-    // Wide copy verification keeps every row for the draft catch-up.
-    s->mtp_.target_hidden =
-        Alloc<float>(a,
-                     static_cast<std::size_t>(
-                         std::max(options_.max_speculative, max_copy_rows())) *
-                         c.HcDim(),
-                     error_msg, &s->allocated_bytes_);
+    s->mtp_.target_hidden = Alloc<float>(
+        a, static_cast<std::size_t>(options_.max_speculative) * c.HcDim(),
+        error_msg, &s->allocated_bytes_);
     s->mtp_.k_cache =
         Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
                       error_msg, &s->allocated_bytes_);
@@ -1503,85 +1544,6 @@ bool Executor::EnsureRollback(Session& session, std::uint32_t depth,
   return true;
 }
 
-std::size_t Executor::WideSegmentFloats() const {
-  const auto& c = config();
-  const std::size_t conv =
-      std::size_t{c.ssm_conv_kernel - 1} * c.SsmConvChannels();
-  const std::size_t full = GdnRollbackRowFloats(
-      0, c.ssm_num_k_heads, c.ssm_num_v_heads, c.ssm_head_dim);
-  const std::size_t ple =
-      c.ple_layer >= 0 ? std::size_t{c.PleConvHistory()} * c.HcDim() : 0;
-  constexpr std::uint32_t kRows =
-      static_cast<std::uint32_t>(sizeof(RollbackRows::rows) / sizeof(float*));
-  std::size_t floats = ple * (kRows + 1);
-  for (std::uint32_t il = 0; il < c.num_layers; ++il) {
-    if (!c.IsLinearLayer(il))
-      continue;
-    floats += conv * (kRows + 1) + full;
-    for (std::uint32_t row = 0; row < kRows; ++row)
-      floats += GdnRollbackRowFloats(row, c.ssm_num_k_heads, c.ssm_num_v_heads,
-                                     c.ssm_head_dim);
-  }
-  return floats;
-}
-
-bool Executor::EnsureWideSegments(std::uint32_t segments,
-                                  std::string* error_msg) const {
-  if (wide_controls_ == nullptr &&
-      !Check(hip::AllocateDevice(&wide_controls_, std::size_t{kWideRows / 8} *
-                                                      sizeof(Session::Control)),
-             "wide verification controls", error_msg))
-    return false;
-  const auto& c = config();
-  const std::size_t conv =
-      std::size_t{c.ssm_conv_kernel - 1} * c.SsmConvChannels();
-  const std::size_t full = GdnRollbackRowFloats(
-      0, c.ssm_num_k_heads, c.ssm_num_v_heads, c.ssm_head_dim);
-  const std::size_t ple =
-      c.ple_layer >= 0 ? std::size_t{c.PleConvHistory()} * c.HcDim() : 0;
-  constexpr std::uint32_t kRows =
-      static_cast<std::uint32_t>(sizeof(RollbackRows::rows) / sizeof(float*));
-  while (wide_segments_.size() < segments) {
-    const std::size_t floats = WideSegmentFloats();
-    float* allocation = nullptr;
-    if (!Check(hip::AllocateDevice(&allocation, floats * sizeof(float)),
-               "wide rollback allocation", error_msg))
-      return false;
-    wide_allocations_.push_back(allocation);
-    WideSegment seg;
-    seg.conv.resize(c.num_layers);
-    seg.state.resize(c.num_layers);
-    seg.conv_start.resize(c.num_layers, nullptr);
-    seg.state_start.resize(c.num_layers, nullptr);
-    auto* next = allocation;
-    for (std::uint32_t il = 0; il < c.num_layers; ++il) {
-      if (!c.IsLinearLayer(il))
-        continue;
-      seg.conv_start[il] = next;
-      next += conv;
-      seg.state_start[il] = next;
-      next += full;
-      for (std::uint32_t row = 0; row < kRows; ++row) {
-        seg.conv[il].rows[row] = next;
-        next += conv;
-        seg.state[il].rows[row] = next;
-        next += GdnRollbackRowFloats(row, c.ssm_num_k_heads, c.ssm_num_v_heads,
-                                     c.ssm_head_dim);
-      }
-    }
-    if (ple != 0) {
-      seg.ple_start = next;
-      next += ple;
-      for (std::uint32_t row = 0; row < kRows; ++row) {
-        seg.ple.rows[row] = next;
-        next += ple;
-      }
-    }
-    wide_segments_.push_back(std::move(seg));
-  }
-  return true;
-}
-
 std::size_t Executor::SessionBytes(
     core::SessionMode mode, std::uint32_t max_context,
     std::uint32_t rollback_depth) const noexcept {
@@ -1613,9 +1575,8 @@ std::size_t Executor::SessionBytes(
          attention * (kv + index) + sizeof(Session::Control) +
          (mode == core::SessionMode::kSpeculative
               ? kv + index +
-                    std::size_t{std::max(options_.max_speculative + 1,
-                                         max_copy_rows())} *
-                        c.HcDim() * sizeof(float) +
+                    std::size_t{options_.max_speculative + 1} * c.HcDim() *
+                        sizeof(float) +
                     (model_->draft_output().empty()
                          ? 0
                          : std::size_t{kMtpDraftExtraRows} *
@@ -1645,11 +1606,6 @@ std::size_t Executor::DeferredScratchBytes() const {
                                          c.HcDim() * sizeof(float)
                                    : 0);
   }
-  // Rollback rows of a wide copy verification's later segments.
-  const std::size_t wide_segments = max_copy_rows() / 8;
-  if (wide_segments > 1 + wide_segments_.size())
-    bytes += (wide_segments - 1 - wide_segments_.size()) * WideSegmentFloats() *
-             sizeof(float);
   // Committed spare blocks for captures, whether or not they exist yet.
   return bytes + SnapshotAllocator::SpareBytes(mutable_bytes);
 }
@@ -1721,6 +1677,20 @@ bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
             w.data, nullptr, q.data, out, static_cast<int>(w.rows),
             static_cast<int>(q.n), static_cast<int>(w.cols), stream_) != 0) {
       AssignError(error_msg, "Q8_0 GEMV failed");
+      return false;
+    }
+    return true;
+  }
+  if (IsSmallQuantFormat(w.type) && DenseVecWanted(w.type, w.rows) &&
+      q.data != nullptr) {
+    if (w.cols != q.k) {
+      AssignError(error_msg, "quantized input width mismatch");
+      return false;
+    }
+    if (qfn_mmq_dense_vec(static_cast<int>(w.type), w.data, q.data, out,
+                          static_cast<int>(w.rows), static_cast<int>(q.n),
+                          static_cast<int>(w.cols), stream_) != 0) {
+      AssignError(error_msg, "quantized dense GEMV failed");
       return false;
     }
     return true;
@@ -1805,6 +1775,20 @@ bool Executor::DenseF16Route(const DeviceTensor& w,
 
 bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
                      std::uint32_t n_tokens, std::string* error_msg) const {
+  // Dense Q6_K stays compact but runs wide prefill on the F16 WMMA tier with
+  // an in-LDS dequant, instead of the dequant-bound MMQ path. Decode keeps
+  // its Q6_K GEMV/MMQ.
+  if (MatrixRows(n_tokens) && n_tokens <= options_.max_batch &&
+      w.type == GgmlType::kQ6_K && w.experts == 1 && w.cols % 256 == 0 &&
+      w.cols <= model_->max_half_cols()) {
+    PrepareHalfInput(x, n_tokens, w.cols);
+    if (!DenseF16GemmQ6K(w.data, static_cast<const __half*>(s_.x_half), out,
+                         n_tokens, w.rows, w.cols, stream_)) {
+      AssignError(error_msg, "dense Q6_K F16 GEMM failed");
+      return false;
+    }
+    return true;
+  }
   if (w.type == GgmlType::kQ8_0) {
     if (!MatrixRows(n_tokens)) {
       Q8Input q;
@@ -1845,6 +1829,31 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
         AssignError(error_msg, "W8A8 GEMM failed");
         return false;
       }
+    }
+    return true;
+  }
+  if (IsSmallQuantFormat(w.type)) {
+    if (!MatrixRows(n_tokens) &&
+        (DenseVecWanted(w.type, w.rows) ||
+         DenseQ6KGemvWanted(w, n_tokens))) {
+      Q8Input q;
+      if (!Quantize(x, n_tokens, w.cols, &q, error_msg)) {
+        return false;
+      }
+      if (qfn_mmq_dense_vec(static_cast<int>(w.type), w.data, q.data, out,
+                            static_cast<int>(w.rows),
+                            static_cast<int>(n_tokens),
+                            static_cast<int>(w.cols), stream_) != 0) {
+        AssignError(error_msg, "quantized dense GEMV failed");
+        return false;
+      }
+      return true;
+    }
+    if (qfn_mmq_dense(static_cast<int>(w.type), w.data, x, out,
+                      static_cast<int>(w.rows), static_cast<int>(n_tokens),
+                      static_cast<int>(w.cols), stream_) != 0) {
+      AssignError(error_msg, "quantized dense projection failed");
+      return false;
     }
     return true;
   }
@@ -1988,6 +1997,13 @@ bool Executor::Experts(const DeviceTensor& w, const float* x,
       case GgmlType::kQ8_0:
         rc = qfn_mmq_q8_0_moe_raw(w.data, x, ids, out, M, K, T, E, U, stream_);
         break;
+      case GgmlType::kIQ2_S:
+      case GgmlType::kIQ3_XXS:
+      case GgmlType::kIQ3_S:
+      case GgmlType::kIQ4_NL:
+        rc = qfn_mmq_moe_raw(static_cast<int>(w.type), w.data, x, ids, out, M,
+                             K, T, E, U, stream_);
+        break;
       default:
         break;
     }
@@ -2033,6 +2049,21 @@ bool Executor::GatedExperts(const DeviceTensor& a, const DeviceTensor& b,
                         static_cast<int>(n_used), stream_, b.data,
                         s_.up_e) != 0) {
       AssignError(error_msg, "expert vector pair GEMM failed");
+      return false;
+    }
+  } else if (same_shape &&
+             (a.type == GgmlType::kIQ2_S || a.type == GgmlType::kIQ3_XXS ||
+              a.type == GgmlType::kIQ3_S || a.type == GgmlType::kIQ4_NL)) {
+    // Gate/up share shape, routing and input: build the gather map and
+    // quantize the activations once, then run both MMQ projections back to
+    // back instead of rebuilding both for the second projection.
+    RoutedHints(a, n_tokens);
+    if (qfn_mmq_moe_pair(
+            static_cast<int>(a.type), a.data, b.data, x, ids, out, s_.up_e,
+            static_cast<int>(a.rows), static_cast<int>(a.cols),
+            static_cast<int>(n_tokens), static_cast<int>(a.experts),
+            static_cast<int>(n_used), stream_) != 0) {
+      AssignError(error_msg, "expert pair GEMM failed");
       return false;
     }
   } else if (same_shape && a.type == GgmlType::kQ4_K) {
@@ -3095,23 +3126,6 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
   return true;
 }
 
-bool Executor::KeepHiddenRow(Session& session, std::uint32_t row,
-                             std::string* error_msg) const {
-  if (!session.mtp_enabled_ || session.owner_ != this ||
-      row >= std::max(options_.max_speculative, max_copy_rows())) {
-    AssignError(error_msg, "invalid kept trunk hidden row");
-    return false;
-  }
-  if (row == 0)
-    return true;
-  const auto dim = std::size_t{config().HcDim()};
-  return Check(
-      hipMemcpyAsync(session.mtp_.target_hidden,
-                     session.mtp_.target_hidden + row * dim,
-                     dim * sizeof(float), hipMemcpyDeviceToDevice, stream_),
-      "kept hidden row", error_msg);
-}
-
 bool Executor::CopyTrunkHidden(const Session& session, std::span<float> hidden,
                                std::string* error_msg) const {
   if (!session.mtp_enabled_ || session.owner_ != this ||
@@ -3263,7 +3277,6 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   const bool speculative = mode == ForwardMode::kVerify;
   PrefillPhase phase(mode == ForwardMode::kPrefill);
   selected_logits_ = nullptr;
-  wide_rows_ = 0;
   DropReadyQ8();
   const Config& c = config();
   const auto n = static_cast<std::uint32_t>(tokens.size());
@@ -3489,7 +3502,6 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                           checkpoint ? checkpoint->tokens : 0)) {
       return false;
     }
-
     const float* next_norm =
         il + 1 < c.num_layers
             ? (c.IsPleLayer(il + 1) ? nullptr
@@ -3635,51 +3647,15 @@ bool Executor::Rollback(Session& session, std::uint32_t keep,
   if (keep < n) {
     const std::size_t conv_elems =
         static_cast<std::size_t>(c.ssm_conv_kernel - 1) * c.SsmConvChannels();
-    const std::size_t state_elems = GdnRollbackRowFloats(
-        0, c.ssm_num_k_heads, c.ssm_num_v_heads, c.ssm_head_dim);
-    // A wide verification (ForwardWide) ran consecutive segments of at most
-    // eight rows. Cut back within the segment holding the last kept row;
-    // keeping a whole segment restores the next one's starting state.
-    constexpr std::uint32_t kSegment =
-        static_cast<std::uint32_t>(sizeof(RollbackRows::rows) /
-                                   sizeof(float*)) +
-        1;
-    const std::uint32_t segment = (keep - 1) / kSegment;
-    const std::uint32_t local = keep - segment * kSegment;
-    const bool whole = local == std::min(kSegment, n - segment * kSegment);
-    if (segment != 0 || whole) {
-      if (n <= kSegment || wide_segments_.size() < (n - 1) / kSegment) {
-        AssignError(error_msg, "rollback outside the wide verification");
-        return false;
-      }
-    }
-    const WideSegment* start = whole ? &wide_segments_[segment] : nullptr;
-    const WideSegment* rows =
-        !whole && segment != 0 ? &wide_segments_[segment - 1] : nullptr;
-    const std::size_t slot = local - 1;
-    for (std::size_t il = 0; il < session.linear_.size(); ++il) {
-      auto& l = session.linear_[il];
+    const std::size_t slot = keep - 1;
+    for (auto& l : session.linear_) {
       if (l.state == nullptr) {
         continue;
       }
-      if (start != nullptr) {
-        if (!Check(hipMemcpyAsync(l.state, start->state_start[il],
-                                  state_elems * sizeof(float),
-                                  hipMemcpyDeviceToDevice, stream_),
-                   "state rollback", error_msg) ||
-            !Check(hipMemcpyAsync(l.conv_state, start->conv_start[il],
-                                  conv_elems * sizeof(float),
-                                  hipMemcpyDeviceToDevice, stream_),
-                   "conv rollback", error_msg))
-          return false;
-        continue;
-      }
-      const auto& state_rows = rows ? rows->state[il] : l.state_snapshots;
-      const auto& conv_rows = rows ? rows->conv[il] : l.conv_snapshots;
-      RestoreGdnState(l.state, state_rows, local, c.ssm_num_k_heads,
+      RestoreGdnState(l.state, l.state_snapshots, keep, c.ssm_num_k_heads,
                       c.ssm_num_v_heads, stream_);
       if (!Check(hipGetLastError(), "state rollback", error_msg) ||
-          !Check(hipMemcpyAsync(l.conv_state, conv_rows.rows[slot],
+          !Check(hipMemcpyAsync(l.conv_state, l.conv_snapshots.rows[slot],
                                 conv_elems * sizeof(float),
                                 hipMemcpyDeviceToDevice, stream_),
                  "conv rollback", error_msg)) {
@@ -3689,16 +3665,13 @@ bool Executor::Rollback(Session& session, std::uint32_t keep,
     if (session.ple_history_ != nullptr) {
       const std::size_t hist =
           static_cast<std::size_t>(c.PleConvHistory()) * c.HcDim();
-      const float* source = start  ? start->ple_start
-                            : rows ? rows->ple.rows[slot]
-                                   : session.ple_snapshots_.rows[slot];
-      if (!Check(
-              hipMemcpyAsync(session.ple_history_, source, hist * sizeof(float),
-                             hipMemcpyDeviceToDevice, stream_),
-              "PLE rollback", error_msg)) {
+      if (!Check(hipMemcpyAsync(
+                     session.ple_history_, session.ple_snapshots_.rows[slot],
+                     hist * sizeof(float), hipMemcpyDeviceToDevice, stream_),
+                 "PLE rollback", error_msg)) {
         return false;
       }
-      session.ngram_ = session.ngram_snapshots_[keep - 1];
+      session.ngram_ = session.ngram_snapshots_[slot];
     }
     session.position_ = session.spec_base_ + keep;
     // Pooled block keys past the kept prefix are stale; they are rebuilt
@@ -4420,9 +4393,9 @@ bool Executor::RestoreSnapshot(Session& session,
 bool Executor::ReadVerificationRows(std::uint32_t row, std::span<float> logits,
                                     std::string* error_msg) const {
   const auto vocab = config().vocab_size;
-  const auto rows = std::max(options_.max_speculative, wide_rows_);
-  if (row >= rows || logits.empty() || logits.size() % vocab != 0 ||
-      logits.size() / vocab > rows - row) {
+  if (row >= options_.max_speculative || logits.empty() ||
+      logits.size() % vocab != 0 ||
+      logits.size() / vocab > options_.max_speculative - row) {
     AssignError(error_msg, "invalid verification row");
     return false;
   }
@@ -4439,24 +4412,6 @@ bool Executor::GreedyMtpPredictions(std::span<ArgmaxCandidate> predictions,
                                     std::span<const std::int32_t> drafts,
                                     std::string* error_msg) const {
   const auto rows = predictions.size();
-  if (rows > 7 && rows < wide_rows_ && drafts.size() == rows &&
-      selected_logits_ != nullptr) {
-    // A wide copy verification: rows of at most seven at a time, each with
-    // the penalty history of the drafts before it.
-    const float* logits = selected_logits_;
-    auto tentative = sampler.WithoutConstraint();
-    bool ok = true;
-    for (std::size_t first = 0; ok && first < rows; first += 7) {
-      const auto count = std::min<std::size_t>(7, rows - first);
-      selected_logits_ = logits + first * config().vocab_size;
-      ok = GreedyMtpPredictions(predictions.subspan(first, count), tentative,
-                                drafts.subspan(first, count), error_msg);
-      for (std::size_t i = first; ok && i < first + count; ++i)
-        tentative.Accept(static_cast<sampling::TokenId>(drafts[i]));
-    }
-    selected_logits_ = logits;
-    return ok;
-  }
   if (rows == 0 || rows > options_.max_logit_rows || rows > 7 ||
       drafts.size() != rows || s_.mtp_ids == nullptr) {
     AssignError(error_msg, "invalid greedy MTP verification request");
@@ -4524,12 +4479,6 @@ bool Executor::GreedyMtpPredictions(std::span<ArgmaxCandidate> predictions,
   return copied && completed;
 }
 
-bool Executor::CanCompactWideVerification(const sampling::SamplerState& sampler,
-                                          std::size_t rows) {
-  return CanCompactMtpVerification(sampler) &&
-         sampler.penalties().size() + rows + 8 <= kCompactPenaltyLimit;
-}
-
 bool Executor::CanCompactMtpVerification(
     const sampling::SamplerState& sampler) {
   const auto& config = sampler.config();
@@ -4545,32 +4494,6 @@ bool Executor::SampledMtpCandidates(
     const sampling::SamplerState& sampler, std::span<const std::int32_t> drafts,
     std::string* error_msg) const {
   const auto rows = output.size();
-  if (rows > 7 && rows < wide_rows_ && drafts.size() == rows &&
-      selected_logits_ != nullptr &&
-      CanCompactWideVerification(sampler, rows)) {
-    // A wide copy verification: rows of at most seven at a time, each with
-    // the penalty history of the drafts before it, kept beyond the next
-    // piece's download.
-    const float* logits = selected_logits_;
-    auto tentative = sampler.WithoutConstraint();
-    wide_candidates_.resize(std::max(wide_candidates_.size(), rows));
-    bool ok = true;
-    for (std::size_t first = 0; ok && first < rows; first += 7) {
-      const auto count = std::min<std::size_t>(7, rows - first);
-      std::array<std::span<const sampling::LogitCandidate>, 7> piece{};
-      selected_logits_ = logits + first * config().vocab_size;
-      ok = SampledMtpCandidates(std::span(piece).first(count), tentative,
-                                drafts.subspan(first, count), error_msg);
-      for (std::size_t i = 0; ok && i < count; ++i) {
-        auto& kept = wide_candidates_[first + i];
-        kept.assign(piece[i].begin(), piece[i].end());
-        output[first + i] = kept;
-        tentative.Accept(static_cast<sampling::TokenId>(drafts[first + i]));
-      }
-    }
-    selected_logits_ = logits;
-    return ok;
-  }
   if (rows == 0 || rows > 7 || rows >= options_.max_speculative ||
       rows != drafts.size() || verification_ids_ == nullptr ||
       !CanCompactMtpVerification(sampler)) {
@@ -4640,9 +4563,7 @@ bool Executor::MtpForward(Session& session,
   if (n == 0 || n > options_.max_batch || (hidden_row < 0 && n != 1) ||
       (hidden_row >= 0 &&
        static_cast<std::uint32_t>(hidden_row) + n >
-           (hidden_source
-                ? options_.max_batch
-                : std::max(options_.max_speculative, max_copy_rows())))) {
+           (hidden_source ? options_.max_batch : options_.max_speculative))) {
     AssignError(error_msg, "MTP batch outside the kept hidden rows");
     return false;
   }
