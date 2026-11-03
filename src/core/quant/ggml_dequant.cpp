@@ -1098,4 +1098,19 @@ bool DequantizeRow(core::GgmlType type, const void* src, float* dst,
   }
 }
 
+float DotProductIQ3_XXS(const void* row_data, std::span<const float> vec,
+                        std::size_t k) {
+  const auto* bytes = static_cast<const std::uint8_t*>(row_data);
+  float block[256];
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < k / 256; ++b) {
+    DequantizeIQ3_XXS(bytes + (b * 98), block, 256);
+    const float* v = vec.data() + (b * 256);
+    for (std::size_t i = 0; i < 256; ++i) {
+      sum += block[i] * v[i];
+    }
+  }
+  return sum;
+}
+
 }  // namespace gufo::quant

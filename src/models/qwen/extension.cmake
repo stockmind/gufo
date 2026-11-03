@@ -12,6 +12,7 @@ gufo_extension_target(
     modules/attention.cpp
     modules/embed.cpp
     modules/ffn.cpp
+    modules/moe.cpp
     modules/norm.cpp
     modules/quant_gemm.cpp
     modules/residual.cpp
@@ -73,6 +74,8 @@ gufo_extension_target(
     gufo_qwen_vision
     gufo_qwen_draft_vocab
     gufo_compare
+    gufo_qwen38_flash_next_mmq
+    gufo_qwen38_flash_next_kernels
     hip::host
 )
 
@@ -81,6 +84,7 @@ if(TARGET gufo_qwen_hip)
     SOURCES
       hip/attention.hip
       hip/batched_ssm.hip
+      hip/moe.hip
   )
   target_compile_definitions(gufo_qwen_hip PUBLIC ENGINE_ENABLE_HIP=1)
   target_include_directories(gufo_qwen_hip SYSTEM PUBLIC

@@ -203,6 +203,10 @@ float DotProductIQ4_XS(const void* row_data, std::span<const float> vec,
 float DotProductIQ3_S(const void* row_data, std::span<const float> vec,
                       std::size_t k);
 
+// Compute dot product of IQ3_XXS quantized row with FP32 vector
+float DotProductIQ3_XXS(const void* row_data, std::span<const float> vec,
+                        std::size_t k);
+
 // The remaining GGML block formats, element for element as ggml-quants.c's
 // dequantize_row_* (Q4_0, Q4_1, Q5_0: 32 elements; Q2_K and the IQ1/IQ2/IQ3
 // formats: 256).
