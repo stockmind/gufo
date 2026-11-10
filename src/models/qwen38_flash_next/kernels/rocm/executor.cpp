@@ -2150,8 +2150,7 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
   }
   if (IsSmallQuantFormat(w.type)) {
     if (!MatrixRows(n_tokens) &&
-        (DenseVecWanted(w.type, w.rows) ||
-         DenseQ6KGemvWanted(w, n_tokens))) {
+        (DenseVecWanted(w.type, w.rows) || DenseQ6KGemvWanted(w, n_tokens))) {
       Q8Input q;
       if (!Quantize(x, n_tokens, w.cols, &q, error_msg)) {
         return false;
@@ -2374,11 +2373,11 @@ bool Executor::GatedExperts(const DeviceTensor& a, const DeviceTensor& b,
     // quantize the activations once, then run both MMQ projections back to
     // back instead of rebuilding both for the second projection.
     RoutedHints(a, n_tokens);
-    if (qfn_mmq_moe_pair(
-            static_cast<int>(a.type), a.data, b.data, x, ids, out, s_.up_e,
-            static_cast<int>(a.rows), static_cast<int>(a.cols),
-            static_cast<int>(n_tokens), static_cast<int>(a.experts),
-            static_cast<int>(n_used), stream_) != 0) {
+    if (qfn_mmq_moe_pair(static_cast<int>(a.type), a.data, b.data, x, ids, out,
+                         s_.up_e, static_cast<int>(a.rows),
+                         static_cast<int>(a.cols), static_cast<int>(n_tokens),
+                         static_cast<int>(a.experts), static_cast<int>(n_used),
+                         stream_) != 0) {
       AssignError(error_msg, "expert pair GEMM failed");
       return false;
     }

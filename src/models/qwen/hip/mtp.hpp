@@ -263,7 +263,8 @@ public:
       const override;
   void RestoreSnapshot(
       const speculative::IDraftBackendSnapshot& snapshot) override;
-  void RestorePersistentSnapshot(std::span<const std::uint8_t> payload) override;
+  void RestorePersistentSnapshot(
+      std::span<const std::uint8_t> payload) override;
 
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const noexcept {
     return executor_->GetMemoryUsage();

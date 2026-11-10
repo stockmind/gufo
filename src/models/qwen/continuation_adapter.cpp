@@ -364,10 +364,9 @@ hip::QwenMtpGpuDraftBackend* ContinuationAdapter::GetMtpDraftBackend(
 speculative::IDraftBackend* ContinuationAdapter::GetDraft(cache::Slot& slot) {
   auto& state = As(slot);
   state.BeforeExecution();
-  return state.mtp_draft ? static_cast<speculative::IDraftBackend*>(
-                               state.mtp_draft.get())
-                         : static_cast<speculative::IDraftBackend*>(
-                               state.draft.get());
+  return state.mtp_draft
+             ? static_cast<speculative::IDraftBackend*>(state.mtp_draft.get())
+             : static_cast<speculative::IDraftBackend*>(state.draft.get());
 }
 ContinuationFrontier& ContinuationAdapter::GetFrontier(cache::Slot& slot) {
   auto& state = As(slot);
@@ -448,8 +447,7 @@ std::unique_ptr<cache::Slot> ContinuationAdapter::CreateSlot(
     std::string error;
     auto config = mtp_config_;
     config.vision_input = &executor->VisionInput();
-    mtp_draft =
-        hip::QwenMtpGpuDraftBackend::Create(mtp_model_, config, &error);
+    mtp_draft = hip::QwenMtpGpuDraftBackend::Create(mtp_model_, config, &error);
     if (!mtp_draft)
       throw std::runtime_error("cannot create component MTP draft: " + error);
     executor->ReservePromptHiddenCapture(

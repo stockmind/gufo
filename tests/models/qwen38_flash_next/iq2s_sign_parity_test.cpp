@@ -49,11 +49,10 @@ int main() {
       const std::uint32_t b1 = ((sb & 0x30) >> 4) | ((sb & 0xC0) >> 6);
       for (int grp = 0; grp < 2; ++grp) {
         const int shift = grp == 0 ? 0 : 4;
-        const std::uint32_t add =
-            ((sb >> (shift + 0)) & 1u) |
-            (((sb >> (shift + 1)) & 1u) << 8) |
-            (((sb >> (shift + 2)) & 1u) << 16) |
-            (((sb >> (shift + 3)) & 1u) << 24);
+        const std::uint32_t add = ((sb >> (shift + 0)) & 1u) |
+                                  (((sb >> (shift + 1)) & 1u) << 8) |
+                                  (((sb >> (shift + 2)) & 1u) << 16) |
+                                  (((sb >> (shift + 3)) & 1u) << 24);
         const std::uint32_t fast = ApplySignBits(grid, add);
         // Original: mask the group's four sign bits into its byte MSBs, then
         // vsub4. Group 0 uses bits 0..3, group 1 uses bits 4..7.
@@ -72,7 +71,8 @@ int main() {
           break;
         }
       }
-      if (!ok) break;
+      if (!ok)
+        break;
     }
   }
   std::printf(ok ? "IQ2S_SIGN_PARITY_PASS\n" : "IQ2S_SIGN_PARITY_FAIL\n");

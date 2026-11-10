@@ -232,7 +232,8 @@ int main(int argc, const char* const* argv) {
         mtp_model, draft_config, &error);
     Expect(persistent_backend != nullptr, error);
     persistent_backend->RestorePersistentSnapshot(persistent);
-    const auto persistent_proposal = persistent_backend->Propose(sequence, 4, 2);
+    const auto persistent_proposal =
+        persistent_backend->Propose(sequence, 4, 2);
     Expect(persistent_proposal.tokens == second_proposal.tokens,
            "MTP persistent restore must reproduce the committed proposal");
 

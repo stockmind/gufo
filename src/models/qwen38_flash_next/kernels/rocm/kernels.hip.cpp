@@ -5692,16 +5692,15 @@ __launch_bounds__(256) __global__
       } else if constexpr (kQ6) {
         // half2 (d * scale of elements 0-15, d * scale of 16-31); the -32
         // code offset is taken out by the magic constant.
-        const float d =
-            f_live[u] ? __half2float(__builtin_bit_cast(
-                            __half, static_cast<std::uint16_t>(f_dm[u])))
-                      : 0.0F;
+        const float d = f_live[u]
+                            ? __half2float(__builtin_bit_cast(
+                                  __half, static_cast<std::uint16_t>(f_dm[u])))
+                            : 0.0F;
         const auto sc_lo = static_cast<std::int8_t>((f_dm[u] >> 16U) & 0xFFU);
         const auto sc_hi = static_cast<std::int8_t>(f_dm[u] >> 24U);
         scale_bias = __builtin_bit_cast(
-            std::uint32_t,
-            __floats2half2_rn(d * static_cast<float>(sc_lo),
-                              d * static_cast<float>(sc_hi)));
+            std::uint32_t, __floats2half2_rn(d * static_cast<float>(sc_lo),
+                                             d * static_cast<float>(sc_hi)));
       } else {
         const int sb32 = f_sb32[u];
         // The first four scale/min bytes live in y/z. Their remaining
@@ -5839,8 +5838,7 @@ __launch_bounds__(256) __global__
             CodesToHalves(nib[i], magic, half_scale, __float2half2_rn(0.0F),
                           h[2 * i], h[2 * i + 1]);
           } else {
-            CodesToHalves(nib[i], magic, scale2, bias2, h[2 * i],
-                          h[2 * i + 1]);
+            CodesToHalves(nib[i], magic, scale2, bias2, h[2 * i], h[2 * i + 1]);
           }
         }
         __builtin_memcpy(&a_lo[u], &h[0], 32);
@@ -7613,11 +7611,11 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    const std::int32_t* rows_in, const std::int32_t* rows_out,
                    const float* swiglu_gate, float* out, __half* out_half,
                    std::size_t m, std::size_t k, hipStream_t stream) {
-  const std::size_t block_elems = (type == WeightType::kQ4_K ||
-                                   type == WeightType::kQ5_K ||
-                                   type == WeightType::kQ6_K)
-                                      ? 256
-                                      : 64;
+  const std::size_t block_elems =
+      (type == WeightType::kQ4_K || type == WeightType::kQ5_K ||
+       type == WeightType::kQ6_K)
+          ? 256
+          : 64;
   if (m == 0 || k == 0 || k % block_elems != 0 || n_tiles == 0 ||
       (out_half == nullptr) == (out == nullptr)) {
     return false;
@@ -7834,9 +7832,8 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     // weights. Each group of four rows produces one mixed hidden element.
     const int weight_row = kHcMix ? (r % 4) * (m_i / 4) + r / 4 : r;
     a_ptr[p] =
-        w_bytes +
-        static_cast<std::size_t>(a_live[p] ? weight_row : (m_i - 1)) *
-            w_row_bytes;
+        w_bytes + static_cast<std::size_t>(a_live[p] ? weight_row : (m_i - 1)) *
+                      w_row_bytes;
   }
   const __half* b_ptr[kBPer];
 #pragma unroll
@@ -7953,8 +7950,8 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
           const std::uint8_t high =
               static_cast<std::uint8_t>((qh[i] >> (2 * seg)) & 0x03U);
           const int q = static_cast<int>((high << 4U) | low) - 32;
-          h[i] = __float2half(d * ((i < 16) ? sc0 : sc1) *
-                              static_cast<float>(q));
+          h[i] =
+              __float2half(d * ((i < 16) ? sc0 : sc1) * static_cast<float>(q));
         }
 #pragma unroll
         for (int c = 0; c < 4; ++c) {

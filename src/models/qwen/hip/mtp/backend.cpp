@@ -101,8 +101,9 @@ public:
     return CheckedPersistentAdd(
         CheckedPersistentAdd(kMtpDraftPersistentHeaderBytes,
                              gpu_snapshot->PersistentPayloadBytes()),
-        CheckedPersistentAdd(target_hidden.size() * sizeof(std::uint32_t),
-                             last_anchor_hidden.size() * sizeof(std::uint32_t)));
+        CheckedPersistentAdd(
+            target_hidden.size() * sizeof(std::uint32_t),
+            last_anchor_hidden.size() * sizeof(std::uint32_t)));
   }
 
   [[nodiscard]] std::size_t SerializePersistent(
@@ -116,7 +117,8 @@ public:
       throw std::invalid_argument("MTP draft unprimed payload contains state");
     const std::size_t gpu_payload_bytes =
         gpu_snapshot->PersistentPayloadBytes();
-    const std::size_t target_bytes = target_hidden.size() * sizeof(std::uint32_t);
+    const std::size_t target_bytes =
+        target_hidden.size() * sizeof(std::uint32_t);
     const std::size_t anchor_bytes =
         last_anchor_hidden.size() * sizeof(std::uint32_t);
 
@@ -163,8 +165,7 @@ public:
     }
     if (CheckedPersistentAdd(anchor_offset, anchor_bytes) !=
         destination.size()) {
-      throw std::logic_error(
-          "MTP draft persistent serializer size mismatch");
+      throw std::logic_error("MTP draft persistent serializer size mismatch");
     }
     return destination.size();
   }
@@ -509,8 +510,8 @@ void QwenMtpGpuDraftBackend::DiscardPendingTargetContext(
 
 std::size_t QwenMtpGpuDraftBackend::SnapshotPayloadBytes() const {
   const std::size_t gpu_bytes = executor_->SnapshotPayloadBytes();
-  std::size_t bytes = CheckedPersistentAdd(
-      gpu_bytes, target_hidden_.size() * sizeof(float));
+  std::size_t bytes =
+      CheckedPersistentAdd(gpu_bytes, target_hidden_.size() * sizeof(float));
   return CheckedPersistentAdd(
       bytes, last_anchor_hidden_.size() * sizeof(float) + sizeof(bool));
 }
@@ -576,14 +577,16 @@ void QwenMtpGpuDraftBackend::RestorePersistentSnapshot(
       GetLittleEndian<std::uint32_t>(payload, 56);
   const std::size_t hidden = executor_->GetHiddenSize();
 
-  if ((flags & ~kMtpDraftPrimedFlag) != 0 ||
-      target_count != hidden ||
+  if ((flags & ~kMtpDraftPrimedFlag) != 0 || target_count != hidden ||
       (anchor_count != 0 && anchor_count != hidden) ||
-      target_count > std::numeric_limits<std::size_t>::max() / sizeof(std::uint32_t) ||
-      anchor_count > std::numeric_limits<std::size_t>::max() / sizeof(std::uint32_t) ||
+      target_count >
+          std::numeric_limits<std::size_t>::max() / sizeof(std::uint32_t) ||
+      anchor_count >
+          std::numeric_limits<std::size_t>::max() / sizeof(std::uint32_t) ||
       valid_context > config_.max_context ||
       GetLittleEndian<std::uint32_t>(payload, 20) != 0) {
-    throw std::invalid_argument("MTP draft persistent metadata is incompatible");
+    throw std::invalid_argument(
+        "MTP draft persistent metadata is incompatible");
   }
   const bool primed = (flags & kMtpDraftPrimedFlag) != 0;
   const std::size_t target_bytes = target_count * sizeof(std::uint32_t);
@@ -594,23 +597,19 @@ void QwenMtpGpuDraftBackend::RestorePersistentSnapshot(
   const std::size_t anchor_offset =
       CheckedPersistentAdd(target_offset, target_bytes);
   if (CheckedPersistentAdd(anchor_offset, anchor_bytes) != payload.size() ||
-      total_bytes != payload.size() ||
-      target_offset > payload.size()) {
-    throw std::invalid_argument(
-        "MTP draft persistent payload size is invalid");
+      total_bytes != payload.size() || target_offset > payload.size()) {
+    throw std::invalid_argument("MTP draft persistent payload size is invalid");
   }
 
   std::vector<float> target_hidden(target_count);
   std::vector<float> anchor_hidden(anchor_count);
   for (std::size_t index = 0; index < target_count; ++index) {
-    target_hidden[index] = std::bit_cast<float>(
-        GetLittleEndian<std::uint32_t>(payload,
-                                       target_offset + index * sizeof(std::uint32_t)));
+    target_hidden[index] = std::bit_cast<float>(GetLittleEndian<std::uint32_t>(
+        payload, target_offset + index * sizeof(std::uint32_t)));
   }
   for (std::size_t index = 0; index < anchor_count; ++index) {
-    anchor_hidden[index] = std::bit_cast<float>(
-        GetLittleEndian<std::uint32_t>(payload,
-                                       anchor_offset + index * sizeof(std::uint32_t)));
+    anchor_hidden[index] = std::bit_cast<float>(GetLittleEndian<std::uint32_t>(
+        payload, anchor_offset + index * sizeof(std::uint32_t)));
   }
 
   executor_->RestorePersistentSnapshot(
