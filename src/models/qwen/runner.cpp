@@ -648,13 +648,11 @@ public:
           artifact_fingerprint, draft_artifact_fingerprint, max_context_,
           execution_policy_, speculative, speculative_options_, dflash_policy_);
     } else {
-      component_identity_ =
-          QwenProcessIdentity(
-              model_.get(),
-              mtp_model_ != nullptr ? static_cast<const void*>(mtp_model_.get())
-                                    : static_cast<const void*>(
-                                          dflash_model_.get()),
-              max_context_);
+      component_identity_ = QwenProcessIdentity(
+          model_.get(),
+          mtp_model_ != nullptr ? static_cast<const void*>(mtp_model_.get())
+                                : static_cast<const void*>(dflash_model_.get()),
+          max_context_);
     }
   }
 
@@ -1255,8 +1253,7 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
   return std::make_shared<QwenTextRunner>(
       std::move(model), max_context, std::move(dflash_model),
       std::move(mtp_model), speculative_options, dflash_policy,
-      std::move(artifact_fingerprint),
-      std::move(draft_artifact_fingerprint));
+      std::move(artifact_fingerprint), std::move(draft_artifact_fingerprint));
 }
 
 std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
@@ -1397,8 +1394,7 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
     speculative_options.use_batched_verification = true;
     speculative_options.retain_frontier_logits = true;
     speculative_options.enable_adaptive_draft_length = false;
-  } else if (options.speculative.backend ==
-             ext::TextSpeculativeBackend::kMtp) {
+  } else if (options.speculative.backend == ext::TextSpeculativeBackend::kMtp) {
     if (options.speculative.draft_model_path.empty()) {
       if (error)
         *error = "MTP HTTP decoding requires --mtp-model";

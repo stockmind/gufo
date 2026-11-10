@@ -3,15 +3,14 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/experimental/hip_utils.hpp>
+#include <gufo/ext/experimental/snapshot_transfer.hpp>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
-
-#include <gufo/ext/experimental/hip_utils.hpp>
-#include <gufo/ext/experimental/snapshot_transfer.hpp>
 
 #include "src/families/qwen/hip_common/attention_policy.hpp"
 #include "src/families/qwen/kernels/ops.hpp"
@@ -127,9 +126,8 @@ std::size_t QwenMtpGpuSnapshot::SerializePersistent(
     SnapshotTransfer transfer;
     transfer.Copy(destination.data() + kMtpGpuPersistentHeaderBytes, d_kv_f32_,
                   f32_bytes);
-    transfer.Copy(
-        destination.data() + kMtpGpuPersistentHeaderBytes + f32_bytes,
-        d_kv_f16_, f16_bytes);
+    transfer.Copy(destination.data() + kMtpGpuPersistentHeaderBytes + f32_bytes,
+                  d_kv_f16_, f16_bytes);
   }
   return destination.size();
 }
@@ -418,8 +416,8 @@ tokenization::TokenId QwenMtpGpuExecutor::Run(tokenization::TokenId input_token,
                           layer.ffn_up.data, layer.ffn_up.type, d_normed_,
                           d_ffn_act_, config.intermediate_size, hidden,
                           stream_);
-    LaunchGEMV(layer.ffn_down.data, layer.ffn_down.type, d_ffn_act_,
-               d_ffn_out_, hidden, config.intermediate_size, stream_,
+    LaunchGEMV(layer.ffn_down.data, layer.ffn_down.type, d_ffn_act_, d_ffn_out_,
+               hidden, config.intermediate_size, stream_,
                models::qwen::QwenGemmMode::kHipMtp);
   }
   LaunchResidualAdd(d_hidden_, d_ffn_out_, d_hidden_, hidden, stream_);
@@ -487,8 +485,7 @@ std::unique_ptr<QwenMtpGpuSnapshot> QwenMtpGpuExecutor::SaveSnapshot() const {
   const std::size_t f32_bytes = elements_per_plane * sizeof(float);
   const std::size_t f16_bytes = elements_per_plane * sizeof(std::uint16_t);
 
-  auto snapshot =
-      std::unique_ptr<QwenMtpGpuSnapshot>(new QwenMtpGpuSnapshot());
+  auto snapshot = std::unique_ptr<QwenMtpGpuSnapshot>(new QwenMtpGpuSnapshot());
   snapshot->kv_width_ = kv_width;
   snapshot->max_context_ = max_context_;
   snapshot->valid_context_ = next_position_;
@@ -509,13 +506,13 @@ void QwenMtpGpuExecutor::RestoreSnapshot(const QwenMtpGpuSnapshot& snapshot) {
   const std::size_t kv_width =
       static_cast<std::size_t>(model_->GetConfig().num_key_value_heads) *
       model_->GetConfig().head_dim;
-  if (snapshot.kv_width_ != kv_width ||
-      snapshot.max_context_ != max_context_ ||
+  if (snapshot.kv_width_ != kv_width || snapshot.max_context_ != max_context_ ||
       snapshot.valid_context_ > max_context_ ||
       (kv_width != 0 &&
-       snapshot.valid_context_ > std::numeric_limits<std::size_t>::max() /
-                                    kv_width)) {
-    throw std::invalid_argument("MTP snapshot is incompatible with the executor");
+       snapshot.valid_context_ >
+           std::numeric_limits<std::size_t>::max() / kv_width)) {
+    throw std::invalid_argument(
+        "MTP snapshot is incompatible with the executor");
   }
   const std::size_t elements_per_plane =
       static_cast<std::size_t>(snapshot.valid_context_) * kv_width;
@@ -547,7 +544,8 @@ void QwenMtpGpuExecutor::RestorePersistentSnapshot(
   }
   const std::size_t kv_width = GetLittleEndian<std::uint32_t>(payload, 16);
   const std::uint32_t max_context = GetLittleEndian<std::uint32_t>(payload, 20);
-  const std::uint32_t valid_context = GetLittleEndian<std::uint32_t>(payload, 24);
+  const std::uint32_t valid_context =
+      GetLittleEndian<std::uint32_t>(payload, 24);
   const std::size_t payload_bytes =
       PersistentSizeFromU64(GetLittleEndian<std::uint64_t>(payload, 32));
   const std::size_t total_bytes =

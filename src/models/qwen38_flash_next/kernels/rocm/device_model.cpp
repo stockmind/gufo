@@ -98,8 +98,8 @@ struct Uploader {
   // Flash-Next consumes a few weights directly as F32 (the PLE conv). Some
   // artifacts store them as F16/BF16; widen on the host before upload.
   DeviceTensor Widen(const TensorRef& t) {
-    if (t.empty() || (t.type != core::GgmlType::kF16 &&
-                      t.type != core::GgmlType::kBF16)) {
+    if (t.empty() ||
+        (t.type != core::GgmlType::kF16 && t.type != core::GgmlType::kBF16)) {
       return Copy(t);
     }
     const std::size_t n = t.SizeBytes() / 2;

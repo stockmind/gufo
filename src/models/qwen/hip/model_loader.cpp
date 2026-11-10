@@ -17,15 +17,14 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/families/qwen/kernels/ops/gemm.hpp"
 #include "src/families/qwen/text/chat_template.hpp"
-#include "src/core/quant/ggml_dequant.hpp"
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_fp16.h>
 #endif
-#include "src/models/qwen/hip/executor.hpp"
-
 #include "qfn_mmq.h"
+#include "src/models/qwen/hip/executor.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -336,8 +335,7 @@ std::size_t QwenGpuModel::GetResidentBytes() const noexcept {
     }
     total += region.size;
   }
-  if (prefill_copy_bytes_ >
-      std::numeric_limits<std::size_t>::max() - total) {
+  if (prefill_copy_bytes_ > std::numeric_limits<std::size_t>::max() - total) {
     return std::numeric_limits<std::size_t>::max();
   }
   return total + prefill_copy_bytes_;
@@ -361,9 +359,9 @@ bool QwenGpuModel::BuildPrefillCopies(std::string* error_msg) {
   std::vector<models::QwenTensorRef*> candidates;
   for (auto& layer : weights_.layers) {
     models::QwenTensorRef* dense[] = {
-        &layer.attn_qkv,     &layer.attn_gate,      &layer.ssm_out,
-        &layer.attn_q,       &layer.attn_k,         &layer.attn_v,
-        &layer.attn_output,  &layer.ffn_gate_shexp, &layer.ffn_up_shexp,
+        &layer.attn_qkv,       &layer.attn_gate,      &layer.ssm_out,
+        &layer.attn_q,         &layer.attn_k,         &layer.attn_v,
+        &layer.attn_output,    &layer.ffn_gate_shexp, &layer.ffn_up_shexp,
         &layer.ffn_down_shexp,
     };
     for (auto* tensor : dense) {
@@ -420,8 +418,7 @@ bool QwenGpuModel::BuildPrefillCopies(std::string* error_msg) {
       }
       constexpr std::size_t kQ6KBytes = 210;
       for (std::size_t s = 0, ns = elements / 256; s < ns; ++s) {
-        ::gufo::quant::DequantizeQ6_K(src_blocks + s * kQ6KBytes, staging,
-                                      256);
+        ::gufo::quant::DequantizeQ6_K(src_blocks + s * kQ6KBytes, staging, 256);
         for (std::size_t b = 0; b < 8; ++b) {
           float amax = 0.0F;
           for (std::size_t i = 0; i < 32; ++i) {
@@ -561,12 +558,12 @@ std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
                remap(layer.ssm_conv1d) && remap(layer.ssm_alpha) &&
                remap(layer.ssm_beta) && remap(layer.ssm_a) &&
                remap(layer.ssm_dt) && remap(layer.ssm_norm) &&
-                remap(layer.ffn_norm) && remap(layer.ffn_gate) &&
-                remap(layer.ffn_up) && remap(layer.ffn_down) &&
-                remap(layer.ffn_gate_inp) && remap(layer.ffn_gate_inp_shexp) &&
-                remap(layer.ffn_gate_exps) && remap(layer.ffn_up_exps) &&
-                remap(layer.ffn_down_exps) && remap(layer.ffn_gate_shexp) &&
-                remap(layer.ffn_up_shexp) && remap(layer.ffn_down_shexp);
+               remap(layer.ffn_norm) && remap(layer.ffn_gate) &&
+               remap(layer.ffn_up) && remap(layer.ffn_down) &&
+               remap(layer.ffn_gate_inp) && remap(layer.ffn_gate_inp_shexp) &&
+               remap(layer.ffn_gate_exps) && remap(layer.ffn_up_exps) &&
+               remap(layer.ffn_down_exps) && remap(layer.ffn_gate_shexp) &&
+               remap(layer.ffn_up_shexp) && remap(layer.ffn_down_shexp);
   }
   if (!remapped) {
     ReleaseWeightRegions(weight_regions);
