@@ -597,6 +597,7 @@ int RunQwenBenchmarkImpl(
           dflash_verifier->RestoreSnapshot(*prepared_draft);
       }
       HIP_CHECK(hipDeviceSynchronize());
+      return 0;
     };
 
     for (const std::size_t p_len : opt.n_prompts) {
@@ -615,6 +616,7 @@ int RunQwenBenchmarkImpl(
                                              static_cast<std::uint32_t>(depth));
         }
         HIP_CHECK(hipDeviceSynchronize());
+        return 0;
       };
       restore_depth();
       prefill();

@@ -78,12 +78,42 @@ pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
 # Extension-only libraries come from each selected extension's manifest
 # `packages` (gufo_build_discovered_extensions).
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-# The NPU runtime (src/core/npu): XRT_DIR, XILINX_XRT or /opt/xilinx/xrt; on
-# Windows, Xilinx's XRT SDK unpacked to C:\xrt (BUILD-WINDOWS.md). Do not set
-# XILINX_XRT there: the NPU driver's XRT then looks for its device shim in it.
-find_package(XRT REQUIRED CONFIG
-  HINTS "$ENV{XILINX_XRT}/share/cmake/XRT"
-  PATHS /opt/xilinx/xrt/share/cmake/XRT C:/xrt/xrt_sdk/xrt/share/cmake/XRT)
+# The NPU runtime only needs XRT's coreutil library. Import it directly:
+# XRT's package config validates every exported target, including optional
+# static OpenCL libraries that may not be installed. On Windows, use XRT from
+# C:\xrt; do not set XILINX_XRT there because the NPU driver supplies XRT.
+set(_GUFO_XRT_PREFIXES /opt/xilinx/xrt C:/xrt/xrt_sdk/xrt)
+if(XRT_DIR)
+  get_filename_component(_GUFO_XRT_CONFIG_PREFIX "${XRT_DIR}/../../.." ABSOLUTE)
+  list(PREPEND _GUFO_XRT_PREFIXES "${_GUFO_XRT_CONFIG_PREFIX}")
+endif()
+if(DEFINED ENV{XILINX_XRT} AND NOT "$ENV{XILINX_XRT}" STREQUAL "")
+  list(PREPEND _GUFO_XRT_PREFIXES "$ENV{XILINX_XRT}")
+endif()
+find_path(GUFO_XRT_INCLUDE_DIR NAMES xrt/xrt_bo.h
+  HINTS ${_GUFO_XRT_PREFIXES} PATH_SUFFIXES include REQUIRED)
+if(WIN32)
+  find_library(GUFO_XRT_COREUTIL_LIBRARY NAMES xrt_coreutil
+    HINTS ${_GUFO_XRT_PREFIXES} PATH_SUFFIXES lib lib64 REQUIRED)
+  add_library(XRT::xrt_coreutil UNKNOWN IMPORTED)
+else()
+  # Production XRT is dynamically linked; do not fall back to a static archive.
+  set(_GUFO_SAVED_FIND_LIBRARY_SUFFIXES "${CMAKE_FIND_LIBRARY_SUFFIXES}")
+  set(CMAKE_FIND_LIBRARY_SUFFIXES .so)
+  find_library(GUFO_XRT_COREUTIL_LIBRARY NAMES xrt_coreutil
+    HINTS ${_GUFO_XRT_PREFIXES} PATH_SUFFIXES lib lib64 REQUIRED)
+  set(CMAKE_FIND_LIBRARY_SUFFIXES "${_GUFO_SAVED_FIND_LIBRARY_SUFFIXES}")
+  unset(_GUFO_SAVED_FIND_LIBRARY_SUFFIXES)
+  add_library(XRT::xrt_coreutil SHARED IMPORTED)
+endif()
+set_target_properties(XRT::xrt_coreutil PROPERTIES
+  IMPORTED_LOCATION "${GUFO_XRT_COREUTIL_LIBRARY}"
+  INTERFACE_INCLUDE_DIRECTORIES "${GUFO_XRT_INCLUDE_DIR}")
+if(NOT WIN32)
+  set_property(TARGET XRT::xrt_coreutil PROPERTY INTERFACE_LINK_LIBRARIES uuid)
+endif()
+unset(_GUFO_XRT_PREFIXES)
+unset(_GUFO_XRT_CONFIG_PREFIX)
 set(GUFO_FFMPEG_EXECUTABLE "ffmpeg" CACHE STRING
   "FFmpeg executable used for generated media")
 set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
@@ -308,6 +338,10 @@ endif()
 
 add_subdirectory(src/core/platform)
 add_subdirectory(src/core/rust)
+# The in-tree NPU designs, compiled with IRON when available (or prebuilt) and
+# installed to share/gufo/npu/<name>, where gufo::npu::FindDesign looks for them.
+include(cmake/GufoNpuDesigns.cmake)
+include(cmake/GufoNpuDesignList.cmake)
 add_subdirectory(src/core/npu)
 
 add_library(gufo_core STATIC
@@ -428,6 +462,9 @@ endif()
 
 add_library(gufo_http STATIC
   src/cli/serve/audio_buffer.cpp
+  src/cli/serve/music_wav.cpp
+  src/cli/serve/media_jobs.cpp
+  src/cli/serve/music_api.cpp
   src/cli/serve/image_api.cpp
   src/cli/serve/image_service.cpp
   src/cli/serve/sdapi.cpp
@@ -460,6 +497,7 @@ add_executable(gufo
   src/cli/speak/speak.cpp
   src/cli/decide/decide.cpp
   src/cli/video/video.cpp
+  src/cli/music/music.cpp
   src/cli/serve/serve.cpp
   src/eval/http_client.cpp
 )
@@ -562,11 +600,7 @@ install(FILES
   DESTINATION share/gufo/eval)
 install(FILES LICENSE NOTICE THIRD_PARTY_NOTICES.md DESTINATION share/licenses/gufo)
 install(DIRECTORY licenses/ DESTINATION share/licenses/gufo/third-party)
-if (NOT WIN32)
-install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink gufo \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server\")")
-else()
-  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E copy \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo.exe\" \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server.exe\")")
-endif()
+include(cmake/GufoInstallExecutableAlias.cmake)
 if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
   install(TARGETS tune_hipblaslt DESTINATION bin)
   if (TARGET gufo-kernel-bench)
@@ -813,6 +847,7 @@ endfunction()
   add_executable(transcribe_cli_test
     tests/cli/transcribe_test.cpp
     src/cli/transcribe/transcribe.cpp
+    src/cli/provider_options.cpp
     src/cli/serve/audio_buffer.cpp)
   target_link_libraries(transcribe_cli_test PRIVATE gufo_core gufo_ext_runtime)
   add_test(NAME transcribe_cli_test COMMAND transcribe_cli_test
@@ -1017,6 +1052,16 @@ endfunction()
     extension_model_core_includes_gate
     extension_serving_boundary_gate extension_target_ownership_gate
     PROPERTIES LABELS "cpu;repository" TIMEOUT 30)
+
+  add_test(NAME npu_decoder_plan_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/core/npu_decoder_plan_test.py)
+  set_tests_properties(npu_decoder_plan_test PROPERTIES LABELS "cpu;npu" TIMEOUT 30)
+
+  add_test(NAME npu_prefill_plan_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/core/npu_prefill_plan_test.py)
+  set_tests_properties(npu_prefill_plan_test PROPERTIES LABELS "cpu;npu" TIMEOUT 30)
 
   add_test(NAME check_docs_test
     COMMAND ${Python3_EXECUTABLE}
@@ -1503,12 +1548,15 @@ endfunction()
   add_test(NAME npu_test COMMAND npu_test
     "$<TARGET_FILE:npu_dispatch_fixture>" "${CMAKE_CURRENT_BINARY_DIR}/tests/core/npu-sysfs")
   set_tests_properties(npu_test PROPERTIES LABELS "cpu;npu")
+  add_executable(npu_host_ops_test tests/core/npu_host_ops_test.cpp)
+  target_include_directories(npu_host_ops_test PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(npu_host_ops_test PRIVATE gufo_npu)
+  add_test(NAME npu_host_ops_test COMMAND npu_host_ops_test)
+  set_tests_properties(npu_host_ops_test PROPERTIES LABELS "cpu;npu")
 
-  # On-device NPU check: the in-tree Q8_0 GEMM design (compiled with IRON when
-  # available) against a double reference; skipped without an NPU.
-  include(cmake/GufoNpuDesigns.cmake)
-  gufo_npu_design(q8gemm SCRIPT src/core/npu/kernels/q8gemm/q8gemm.py
-    SOURCES src/core/npu/kernels/q8gemm/q8gemm.cc)
+  # On-device NPU checks of the in-tree designs (compiled with IRON when
+  # available, see gufo_npu_design above) against double references; skipped
+  # without an NPU.
   if(GUFO_NPU_DESIGNS_AVAILABLE)
     add_executable(npu_device_test tests/core/npu_device_test.cpp)
     target_include_directories(npu_device_test PRIVATE ${PROJECT_SOURCE_DIR})
@@ -1516,6 +1564,22 @@ endfunction()
     add_dependencies(npu_device_test npu_design_q8gemm)
     add_test(NAME npu_device_test COMMAND npu_device_test "${q8gemm_NPU_DIR}")
     set_tests_properties(npu_device_test PROPERTIES LABELS "npu" SKIP_RETURN_CODE 77)
+  endif()
+  if(GUFO_NPU_DESIGNS_AVAILABLE)
+    add_executable(npu_qwen3dec_device_test tests/core/npu_qwen3dec_device_test.cpp)
+    target_include_directories(npu_qwen3dec_device_test PRIVATE ${PROJECT_SOURCE_DIR})
+    target_link_libraries(npu_qwen3dec_device_test PRIVATE gufo_npu)
+    add_dependencies(npu_qwen3dec_device_test npu_design_qwen3dec)
+    add_test(NAME npu_qwen3dec_device_test COMMAND npu_qwen3dec_device_test "${qwen3dec_NPU_DIR}" 5)
+    set_tests_properties(npu_qwen3dec_device_test PROPERTIES LABELS "npu" SKIP_RETURN_CODE 77)
+  endif()
+  if(GUFO_NPU_DESIGNS_AVAILABLE)
+    add_executable(npu_bfp_device_test tests/core/npu_bfp_device_test.cpp)
+    target_include_directories(npu_bfp_device_test PRIVATE ${PROJECT_SOURCE_DIR})
+    target_link_libraries(npu_bfp_device_test PRIVATE gufo_npu)
+    add_dependencies(npu_bfp_device_test npu_design_bfpgemm)
+    add_test(NAME npu_bfp_device_test COMMAND npu_bfp_device_test "${bfpgemm_NPU_DIR}")
+    set_tests_properties(npu_bfp_device_test PROPERTIES LABELS "npu" SKIP_RETURN_CODE 77)
   endif()
 
   # the publish suite drives descriptors through dup2
@@ -1582,6 +1646,18 @@ endfunction()
       LABELS "hip;gpu;gfx1151;models;qwen3-tts;talker;voice-design;base;quality;external-model;slow"
       SKIP_RETURN_CODE 77)
 
+    # The NPU Base encoders against the GPU ones (needs both; label npu).
+    add_executable(qwen3_tts_npu_encoders_hip_test
+      tests/models/qwen3_tts/npu_encoders_test.cpp)
+    target_include_directories(qwen3_tts_npu_encoders_hip_test PRIVATE ${PROJECT_SOURCE_DIR})
+    target_link_libraries(qwen3_tts_npu_encoders_hip_test PRIVATE
+      gufo_qwen3_tts gufo_qwen3_tts_hip hip::host)
+    add_test(NAME qwen3_tts_npu_encoders_hip_test
+      COMMAND qwen3_tts_npu_encoders_hip_test
+        ${PROJECT_SOURCE_DIR}/tests/functional/fixtures/audio/clear-english-voice.wav)
+    set_tests_properties(qwen3_tts_npu_encoders_hip_test PROPERTIES
+      LABELS "npu;hip;gpu;models;qwen3-tts;base;external-model"
+      SKIP_RETURN_CODE 77)
     add_executable(qwen3_tts_base_encoders_hip_test
       tests/models/qwen3_tts/base_encoders_hip_test.cpp)
     target_link_libraries(qwen3_tts_base_encoders_hip_test PRIVATE

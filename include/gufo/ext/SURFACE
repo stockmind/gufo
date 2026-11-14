@@ -36,6 +36,7 @@ include/gufo/ext/json.hpp
 include/gufo/ext/ledger.hpp
 include/gufo/ext/mapped_prefetch.hpp
 include/gufo/ext/model_config.hpp
+include/gufo/ext/music.hpp
 include/gufo/ext/options.hpp
 include/gufo/ext/platform/fs.hpp
 include/gufo/ext/platform/library.hpp
@@ -102,8 +103,12 @@ src/core/logging/logging.hpp
 src/core/lora/adapter.hpp
 src/core/mapped_prefetch.hpp
 src/core/model_config.hpp
+src/core/npu/bfp_gemm.hpp
+src/core/npu/host_ops.hpp
 src/core/npu/npu.hpp
 src/core/npu/q8_gemm.hpp
+src/core/npu/qwen3_decoder.hpp
+src/core/npu/qwen3_prefill.hpp
 src/core/platform/fs.hpp
 src/core/platform/gpu_budget.hpp
 src/core/platform/library.hpp
@@ -130,6 +135,7 @@ src/ext/device_probe.hpp
 src/ext/embeddings.hpp
 src/ext/host_budget.hpp
 src/ext/image.hpp
+src/ext/music.hpp
 src/ext/text.hpp
 src/ext/text_contracts.hpp
 src/ext/tts.hpp
