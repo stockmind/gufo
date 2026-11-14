@@ -660,6 +660,23 @@ public:
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
                                 std::size_t ram) const override {
     (void)ram;
+    return CreateCacheResources(ledger, {});
+  }
+  [[nodiscard]] std::unique_ptr<ComponentCacheResources>
+  CreateComponentCacheResourcesForSessions(
+      cache::ResourceLedger& ledger, std::size_t ram,
+      std::size_t sessions) const override {
+    (void)ram;
+    return CreateCacheResources(ledger, hip::PlanComponentTransfers(sessions));
+  }
+  [[nodiscard]] std::unique_ptr<ComponentCacheResources> CreateCacheResources(
+      cache::ResourceLedger& ledger,
+      std::optional<hip::ComponentTransferPlan> transfers) const {
+    auto hooks = HipComponentCacheHooks();
+    if (transfers) {
+      hooks.transfer_streams = transfers->native_streams;
+      hooks.transfer_leases = transfers->leases;
+    }
     auto resources = hip::CreateHipComponentCacheResources(
         std::make_unique<models::qwen::ContinuationAdapter>(
             model_, max_context_, component_identity_, execution_policy_,
@@ -673,7 +690,7 @@ public:
             hip::QwenMtpGpuDraftConfig{
                 .max_context = max_context_,
                 .max_draft_tokens = speculative_options_.max_draft_tokens}),
-        ledger, HipComponentCacheHooks());
+        ledger, std::move(hooks));
     // Qwen's 256-row chunks are small. Preserve a bounded group before
     // waiting, instead of synchronizing every half-MiB range individually.
     resources->reassignment_batch_size = 16;
