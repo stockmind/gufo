@@ -28,6 +28,7 @@ gufo_extension_target(
     provider.cpp
   LINK_LIBRARIES
     gufo_qwen_image_21
+    gufo_qwen_eager
     hip::host
     roc::hipblas
     roc::hipblaslt
@@ -37,7 +38,6 @@ if(TARGET gufo_qwen_image_21_hip)
   gufo_extension_hip_sources(gufo_qwen_image_21_hip
     SOURCES
       hip/kernels.hip
-      hip/attention.hip
       hip/dense.hip
       hip/convolution.hip
       hip/pipeline.cpp
