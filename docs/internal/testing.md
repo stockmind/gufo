@@ -2,8 +2,9 @@
 
 Which checks cover which change, and how to run them. Run the smallest check
 that covers the change; correctness and model-owned quality limits must pass
-before performance results count. CMake and CTest work with system
-dependencies or inside `nix develop`.
+before performance results count. Production targets Linux on an RDNA 3.5 GPU
+(`gfx1151` Strix Halo or `gfx1150` Strix Point). CMake and CTest work with
+system dependencies or inside `nix develop`.
 
 ## Commands
 
