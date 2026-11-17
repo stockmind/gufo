@@ -1,5 +1,6 @@
 schema=gufo-text-continuation-v2
 model_kind=qwen3.8
+device_arch=
 artifact_id=gguf-sha256-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 tokenizer=embedded-in-artifact
 chat_template=qwen38-reasoning-compiled-v3
