@@ -1,6 +1,7 @@
 #include "src/models/qwen38_flash_next/continuation_identity.hpp"
 
 #include <algorithm>
+#include <gufo/ext/experimental/arch.hpp>
 #include <sstream>
 #include <stdexcept>
 
@@ -34,6 +35,7 @@ std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
   std::ostringstream identity;
   identity << "schema=gufo-text-continuation-v2\n"
            << "model_kind=qwen38-flash-next\n"
+           << "device_arch=" << hip::CurrentDeviceArch() << '\n'
            << "artifact_id=" << artifact_scheme << ':' << artifact_fingerprint
            << '\n'
            << "tokenizer=embedded-in-artifact\n"

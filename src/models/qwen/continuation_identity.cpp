@@ -1,6 +1,7 @@
 #include "src/models/qwen/continuation_identity.hpp"
 
 #include <algorithm>
+#include <gufo/ext/experimental/arch.hpp>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -40,6 +41,7 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
   std::ostringstream identity;
   identity << "schema=gufo-text-continuation-v2\n"
            << "model_kind=qwen3.8\n"
+           << "device_arch=" << hip::CurrentDeviceArch() << '\n'
            << "artifact_id=" << ext::kGgufIdentityScheme << ':'
            << artifact_fingerprint << '\n'
            << "tokenizer=embedded-in-artifact\n"

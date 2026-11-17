@@ -1,6 +1,7 @@
 #include "src/models/deepseek_v4_flash/continuation_identity.hpp"
 
 #include <algorithm>
+#include <gufo/ext/experimental/arch.hpp>
 #include <sstream>
 #include <stdexcept>
 
@@ -26,6 +27,7 @@ std::vector<std::uint8_t> DeepSeekCompatibilityIdentity(
   std::ostringstream identity;
   identity << "schema=gufo-text-continuation-v2\n"
            << "model_kind=deepseek4\n"
+           << "device_arch=" << hip::CurrentDeviceArch() << '\n'
            << "artifact_id=" << ext::kGgufIdentityScheme << ':'
            << artifact_fingerprint << '\n'
            << "tokenizer=joyai-byte-bpe-v1\n"
