@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "ace_step",
+  "target": "gufo_ace_step",
+  "kind": "static",
+  "purpose": "ACE-Step 1.5 XL turbo music model (gufo-studio-windows): Qwen3 tokenizer, prompts, DiT, Oobleck VAE and the text-to-music pipeline.",
+  "consumers": [],
+  "checks": []
+}
