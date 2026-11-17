@@ -1,0 +1,126 @@
+{
+  "schema": 1,
+  "name": "ace_step",
+  "version": "0.1.0",
+  "api_version": ">= 0.3.0",
+  "entry": "ace_step_register",
+  "registration_target": "gufo_ace_step",
+  "depends": [],
+  "platforms": [
+    "linux",
+    "windows"
+  ],
+  "providers": [
+    {
+      "id": "ace-step",
+      "capability": "music_generation",
+      "keys": [
+        "safetensors:ace_step"
+      ],
+      "model_ids": [
+        "ace-step-1.5-xl-turbo",
+        "ace-step-1.5-xl-sft",
+        "ace-step-1.5-xl-base"
+      ],
+      "target": "gufo_ace_step_hip",
+      "entry": "ace_step_provider_register"
+    }
+  ],
+  "options": [
+    {
+      "name": "--dit",
+      "type": "string",
+      "commands": [
+        "serve music",
+        "music"
+      ],
+      "providers": [
+        "ace-step"
+      ],
+      "help": "DiT checkpoint: turbo, sft, base or a file path (default: dit.safetensors)"
+    },
+    {
+      "name": "--lm",
+      "type": "string",
+      "commands": [
+        "serve music",
+        "music"
+      ],
+      "providers": [
+        "ace-step"
+      ],
+      "help": "5 Hz planner: none, 0.6b, 1.7b, 4b or a file path (default: lm.safetensors when present)"
+    },
+    {
+      "name": "--variant",
+      "type": "string",
+      "commands": [
+        "serve music",
+        "music"
+      ],
+      "providers": [
+        "ace-step"
+      ],
+      "help": "Sampler variant: turbo, sft, base or empty to read it from the DiT file"
+    }
+  ],
+  "models": [
+    {
+      "id": "ace-step-1.5-xl-turbo",
+      "provider": "ace-step",
+      "license": "mit",
+      "description": "ACE-Step 1.5 XL turbo, Oobleck VAE and the 0.6B 5 Hz planner, BF16 safetensors",
+      "components": [
+        {
+          "role": "weights",
+          "option": "--model",
+          "install": "required",
+          "entry": ".",
+          "include": [
+            "dit.safetensors",
+            "text_encoder.safetensors",
+            "vae.safetensors",
+            "tokenizer.json",
+            "silence_latent.safetensors",
+            "lm-0.6b.safetensors",
+            "LICENSE"
+          ],
+          "source": {
+            "hf": "D3rPapst/ace-step-1.5-gufo",
+            "revision": "54c799b9f22cf0493eec75cde0308a6d6664f536"
+          }
+        }
+      ]
+    }
+  ],
+  "targets": {
+    "gufo_ace_step": {
+      "requires": []
+    },
+    "gufo_ace_step_hip": {
+      "requires": [
+        "hip"
+      ]
+    }
+  },
+  "production_paths": {
+    "include": [
+      "**/*.cpp",
+      "**/*.h",
+      "**/*.hpp",
+      "**/*.hip",
+      "extension.*"
+    ],
+    "exclude": [
+      "tests/",
+      "functional/",
+      "tools/",
+      "fixtures/"
+    ]
+  },
+  "docs": {
+    "title": "ACE-Step 1.5 XL",
+    "inputs": "Style text and lyrics to 48 kHz stereo music; optional bpm, key, time signature, language and planner",
+    "guide": "docs/models/ace-step-1.5.md"
+  }
+}
