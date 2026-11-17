@@ -83,8 +83,8 @@ struct MusicRequest {
                               // extends (outpainting)
   std::string repaint_mode{"balanced"};  // conservative | balanced | aggressive
   float repaint_strength{0.5F};          // balanced only, 0..1
-  float cover_strength{1.0F};        // audio_cover_strength, 0..1
-  float cover_noise_strength{0.0F};  // 0..1, start from the renoised source
+  float cover_strength{1.0F};            // audio_cover_strength, 0..1
+  float cover_noise_strength{0.0F};      // 0..1, start from the renoised source
   std::string track;                     // extract / lego stem name
   std::vector<std::string> track_classes;  // complete
   /// Draw the source latent as `latent_dist.sample()` (the official
@@ -135,8 +135,7 @@ public:
   /// preview is at least `min_interval_seconds` old.
   bool Generate(const MusicRequest& request, std::vector<float>* audio,
                 MusicTelemetry* telemetry, const MusicProgress& progress,
-                std::string* error,
-                const MusicPreviewSink* preview = nullptr);
+                std::string* error, const MusicPreviewSink* preview = nullptr);
 
 private:
   struct Impl;

@@ -71,8 +71,8 @@ std::string EncodePreviewWav(std::span<const float> planar48k) {
     const float mono =
         (left[a] + right[a] + left[a + 1] + right[a + 1]) * 0.25F * gain;
     const float v = std::clamp(mono, -1.0F, 1.0F);
-    AppendU16(&out, static_cast<std::uint16_t>(static_cast<std::int16_t>(
-                        std::lround(v * 32767.0F))));
+    AppendU16(&out, static_cast<std::uint16_t>(
+                        static_cast<std::int16_t>(std::lround(v * 32767.0F))));
   }
   return out;
 }

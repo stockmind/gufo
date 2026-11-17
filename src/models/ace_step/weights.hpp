@@ -6,12 +6,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <gufo/ext/platform/mapped_file.hpp>
 #include <map>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include <gufo/ext/platform/mapped_file.hpp>
 #include "src/models/ace_step/parallel_read.hpp"
 
 namespace gufo::models::ace_step {

@@ -105,8 +105,8 @@ struct FrameRange {
   int start{0};
   int end{0};
 };
-[[nodiscard]] FrameRange RepaintFrames(double start_seconds,
-                                       double end_seconds, int frames);
+[[nodiscard]] FrameRange RepaintFrames(double start_seconds, double end_seconds,
+                                       int frames);
 
 /// Context of a repaint / lego task: the chunk mask [frames] is 1 inside the
 /// range and 0 outside ("explicit" mode of the official UI), the repaint

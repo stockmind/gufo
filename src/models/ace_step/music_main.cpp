@@ -108,11 +108,13 @@ int main(int argc, char** argv) {
     request.timesignature = args["--timesignature"];
   if (args.count("--language"))
     request.language = args["--language"];
-  if (args.count("--task") && !ace::ParseMusicTask(args["--task"], &request.task)) {
+  if (args.count("--task") &&
+      !ace::ParseMusicTask(args["--task"], &request.task)) {
     std::fprintf(stderr, "unknown task %s\n", args["--task"].c_str());
     return 2;
   }
-  if (args.count("--source") && !ReadWav(args["--source"], &request.source_audio))
+  if (args.count("--source") &&
+      !ReadWav(args["--source"], &request.source_audio))
     return 1;
   if (args.count("--reference") &&
       !ReadWav(args["--reference"], &request.reference_audio))
