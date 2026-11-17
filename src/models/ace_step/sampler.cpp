@@ -168,14 +168,13 @@ std::string MusicInstruction(MusicTask task, std::string_view track,
     case MusicTask::kCoverNoFsq:
       return "Generate audio semantic tokens based on the given conditions:";
     case MusicTask::kExtract:
-      return track.empty() ? "Extract the track from the audio:"
-                           : "Extract the " + Upper(track) +
-                                 " track from the audio:";
-    case MusicTask::kLego:
       return track.empty()
-                 ? "Generate the track based on the audio context:"
-                 : "Generate the " + Upper(track) +
-                       " track based on the audio context:";
+                 ? "Extract the track from the audio:"
+                 : "Extract the " + Upper(track) + " track from the audio:";
+    case MusicTask::kLego:
+      return track.empty() ? "Generate the track based on the audio context:"
+                           : "Generate the " + Upper(track) +
+                                 " track based on the audio context:";
     case MusicTask::kComplete: {
       if (track_classes.empty())
         return "Complete the input track:";
@@ -220,8 +219,8 @@ void ApgGuidance::Apply(std::span<const float> cond,
   // diff with momentum: running = diff + momentum * running.
   std::vector<double> diff(count);
   for (std::size_t i = 0; i < count; ++i) {
-    running_[i] = double(cond[i]) - double(uncond[i]) +
-                  double(momentum_) * running_[i];
+    running_[i] =
+        double(cond[i]) - double(uncond[i]) + double(momentum_) * running_[i];
     diff[i] = running_[i];
   }
   // Per channel over time: norm clamp, then the orthogonal projection.
@@ -251,9 +250,8 @@ void ApgGuidance::Apply(std::span<const float> cond,
       const double v1 = double(cond[i]) / cond_norm;
       const double parallel = dot * v1;
       const double orthogonal = diff[i] - parallel;
-      (*out)[i] = static_cast<float>(double(cond[i]) +
-                                     (double(guidance_scale) - 1.0) *
-                                         orthogonal);
+      (*out)[i] = static_cast<float>(
+          double(cond[i]) + (double(guidance_scale) - 1.0) * orthogonal);
     }
   }
 }
@@ -265,8 +263,7 @@ void CfgGuidance(std::span<const float> cond, std::span<const float> uncond,
     (*out)[i] = uncond[i] + guidance_scale * (cond[i] - uncond[i]);
 }
 
-FrameRange RepaintFrames(double start_seconds, double end_seconds,
-                         int frames) {
+FrameRange RepaintFrames(double start_seconds, double end_seconds, int frames) {
   FrameRange range;
   // int(seconds * 48000 // 1920) == floor(seconds * 25).
   int start = static_cast<int>(std::floor(start_seconds * 25.0));
@@ -336,7 +333,8 @@ std::vector<float> RepaintBlendWeights(std::span<const std::uint8_t> mask,
     const auto ramp = Interior(0.0, 1.0, left - fs);
     std::copy(ramp.begin(), ramp.end(), soft.begin() + std::ptrdiff_t(fs));
   }
-  const std::size_t fe = std::min(right + std::size_t(crossfade_frames), frames);
+  const std::size_t fe =
+      std::min(right + std::size_t(crossfade_frames), frames);
   if (fe > right) {
     const auto ramp = Interior(1.0, 0.0, fe - right);
     std::copy(ramp.begin(), ramp.end(), soft.begin() + std::ptrdiff_t(right));

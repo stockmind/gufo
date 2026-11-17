@@ -3,18 +3,17 @@
 // `gufo serve music` request handling and the token oracle test build
 // without HIP).
 // Written with AI assistance (Claude Code).
-#include "src/models/ace_step/pipeline.hpp"
-
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <gufo/ext/json.hpp>
 #include <random>
 #include <string_view>
 #include <system_error>
 
-#include <gufo/ext/json.hpp>
+#include "src/models/ace_step/pipeline.hpp"
 
 namespace gufo::models::ace_step {
 namespace {
@@ -108,8 +107,8 @@ bool ModelPaths::Resolve(const std::filesystem::path& root,
   if (dit.empty()) {
     paths->dit = root / "dit.safetensors";
   } else if (ParseDitVariant(dit, &named)) {
-    paths->dit = root / ("dit-" + std::string(DitVariantName(named)) +
-                         ".safetensors");
+    paths->dit =
+        root / ("dit-" + std::string(DitVariantName(named)) + ".safetensors");
     if (named == DitVariant::kTurbo && !Exists(paths->dit))
       paths->dit = root / "dit.safetensors";
   } else {

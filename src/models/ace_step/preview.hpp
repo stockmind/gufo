@@ -81,8 +81,8 @@ void MusicCleanEstimate(std::span<const float> xt, std::span<const float> v,
 
 /// One published preview.
 struct MusicPreview {
-  int step{0};   // 1-based diffusion step the estimate comes from
-  int steps{0};  // steps of the schedule
+  int step{0};               // 1-based diffusion step the estimate comes from
+  int steps{0};              // steps of the schedule
   double start_seconds{0};   // window position in the song
   double window_seconds{0};  // window length
   double decode_ms{0};       // VAE decode + WAV encode time

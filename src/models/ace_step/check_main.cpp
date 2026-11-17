@@ -12,12 +12,12 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <gufo/ext/json.hpp>
 #include <iterator>
 #include <map>
 #include <string>
 #include <vector>
 
-#include <gufo/ext/json.hpp>
 #include "src/models/ace_step/model.hpp"
 #include "src/models/ace_step/tokenizer.hpp"
 #include "src/models/ace_step/vae.hpp"

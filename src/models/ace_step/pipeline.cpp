@@ -149,17 +149,15 @@ namespace {
 // MusicCleanEstimate) and hands the mono WAV to the sink. A failed decode
 // only drops this preview; the generation itself goes on.
 void PublishPreview(VaeDecoder& vae, const MusicPreviewSink& sink,
-                    std::span<const float> x, std::span<const float> v,
-                    float t, int frames, int step, int steps) {
+                    std::span<const float> x, std::span<const float> v, float t,
+                    int frames, int step, int steps) {
   const auto start = std::chrono::steady_clock::now();
   const PreviewWindow window =
       MusicPreviewWindow(frames, sink.window_seconds, kPreviewMarginFrames);
   if (window.decode_count <= 0)
     return;
-  const std::size_t offset =
-      std::size_t(window.decode_first) * kLatentChannels;
-  const std::size_t length =
-      std::size_t(window.decode_count) * kLatentChannels;
+  const std::size_t offset = std::size_t(window.decode_first) * kLatentChannels;
+  const std::size_t length = std::size_t(window.decode_count) * kLatentChannels;
   std::vector<float> x0;
   MusicCleanEstimate(x.subspan(offset, length), v.subspan(offset, length), t,
                      &x0);
@@ -217,7 +215,7 @@ std::vector<float> MakeContext(std::span<const float> source,
 
 // Diagnostics: GUFO_ACE_DUMP=<dir> writes the raw source latents, the FSQ
 // codes and the detokenized hints of a request as flat little-endian files.
-template <typename T>
+template<typename T>
 void DumpRaw(const char* dir, const char* name, const std::vector<T>& data) {
   std::ofstream out(std::filesystem::path(dir) / name, std::ios::binary);
   out.write(reinterpret_cast<const char*>(data.data()),
@@ -229,8 +227,7 @@ void DumpRaw(const char* dir, const char* name, const std::vector<T>& data) {
 bool MusicPipeline::Generate(const MusicRequest& request,
                              std::vector<float>* audio,
                              MusicTelemetry* telemetry,
-                             const MusicProgress& progress,
-                             std::string* error,
+                             const MusicProgress& progress, std::string* error,
                              const MusicPreviewSink* preview) {
   Impl& m = *impl_;
   MusicTelemetry local;
@@ -350,8 +347,8 @@ bool MusicPipeline::Generate(const MusicRequest& request,
       override_instruction != nullptr && *override_instruction != '\0')
     instruction = override_instruction;
   std::vector<std::uint32_t> text_ids, lyric_ids;
-  if (!m.Encode(MusicTextPrompt(request, instruction, duration),
-                kMaxTextTokens, &text_ids, error) ||
+  if (!m.Encode(MusicTextPrompt(request, instruction, duration), kMaxTextTokens,
+                &text_ids, error) ||
       !m.Encode(MusicLyricPrompt(request), kMaxLyricTokens, &lyric_ids, error))
     return false;
   tm.text_tokens = static_cast<int>(text_ids.size());
@@ -439,8 +436,7 @@ bool MusicPipeline::Generate(const MusicRequest& request,
   if (TaskRepaints(task)) {
     const FrameRange range = RepaintFrames(repaint_start, repaint_end, frames);
     BuildRepaintContext(range, frames, task == MusicTask::kLego,
-                        m.Silence(frames), &source, &chunk_mask,
-                        &repaint_mask);
+                        m.Silence(frames), &source, &chunk_mask, &repaint_mask);
   }
   // The renoised cover start uses the source before the FSQ round trip.
   const std::vector<float> source_pre_fsq = source;
@@ -464,7 +460,8 @@ bool MusicPipeline::Generate(const MusicRequest& request,
     std::vector<float> file(std::size_t(frames) * kLatentChannels);
     in.read(reinterpret_cast<char*>(file.data()),
             static_cast<std::streamsize>(file.size() * sizeof(float)));
-    if (in.gcount() == static_cast<std::streamsize>(file.size() * sizeof(float)))
+    if (in.gcount() ==
+        static_cast<std::streamsize>(file.size() * sizeof(float)))
       source = file;
     else
       return Fail(error, "GUFO_ACE_HINTS_FILE has the wrong size");
@@ -490,7 +487,8 @@ bool MusicPipeline::Generate(const MusicRequest& request,
   // Schedule, noise and the optional renoised cover start.
   start = std::chrono::steady_clock::now();
   std::vector<float> times = MusicTimesteps(steps, shift);
-  const auto noise = MusicNoise(request.seed, std::size_t(frames) * kLatentChannels);
+  const auto noise =
+      MusicNoise(request.seed, std::size_t(frames) * kLatentChannels);
   std::vector<float> x = noise;
   const float cover_noise =
       task == MusicTask::kText2Music
@@ -507,8 +505,8 @@ bool MusicPipeline::Generate(const MusicRequest& request,
   const int cover_steps = static_cast<int>(infer_steps * cover_strength);
   const RepaintConfig repaint =
       ResolveRepaintConfig(request.repaint_mode, request.repaint_strength);
-  const int injection_cutoff = static_cast<int>(
-      std::nearbyint(repaint.injection_ratio * infer_steps));
+  const int injection_cutoff =
+      static_cast<int>(std::nearbyint(repaint.injection_ratio * infer_steps));
   const bool guided = guidance > 1.0F;
   tm.guided = guided;
   ApgGuidance apg;

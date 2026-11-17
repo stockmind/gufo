@@ -4,7 +4,6 @@
 
 #include <cstddef>
 #include <cstdint>
-
 #include <gufo/ext/platform/mapped_file.hpp>
 
 namespace gufo::models::ace_step {

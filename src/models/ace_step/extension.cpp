@@ -17,8 +17,7 @@ bool ProbeAceStep(std::string_view model_root) {
 
 bool ResolveAceStepArtifacts(std::string_view model_root, std::string* error) {
   ModelPaths paths;
-  if (!ModelPaths::FromRoot(std::filesystem::path(model_root), &paths,
-                            error)) {
+  if (!ModelPaths::FromRoot(std::filesystem::path(model_root), &paths, error)) {
     if (error != nullptr && error->empty())
       *error = "not an ACE-Step 1.5 directory: " + std::string(model_root);
     return false;

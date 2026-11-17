@@ -90,7 +90,8 @@ bool DecodeWavStereo(std::span<const std::uint8_t> bytes, StereoAudio* audio,
   const int out_channels = std::min<int>(channels, 2);
   for (std::size_t i = 0; i < samples; ++i) {
     for (int ch = 0; ch < out_channels; ++ch) {
-      const std::uint8_t* p = bytes.data() + data_at + i * frame + ch * bytes_per;
+      const std::uint8_t* p =
+          bytes.data() + data_at + i * frame + ch * bytes_per;
       float value = 0;
       if (is_float && bits == 32) {
         std::uint32_t u = U32(bytes, std::size_t(p - bytes.data()));
@@ -105,8 +106,8 @@ bool DecodeWavStereo(std::span<const std::uint8_t> bytes, StereoAudio* audio,
       } else if (bits == 8) {
         value = (float(p[0]) - 128.0F) / 128.0F;
       } else if (bits == 16) {
-        value = float(static_cast<std::int16_t>(U16(bytes,
-                                                    std::size_t(p - bytes.data())))) /
+        value = float(static_cast<std::int16_t>(
+                    U16(bytes, std::size_t(p - bytes.data())))) /
                 32768.0F;
       } else if (bits == 24) {
         std::int32_t v = (p[0] | (p[1] << 8) | (p[2] << 16));
@@ -135,8 +136,8 @@ std::vector<float> ResampleLikeTorchaudio(std::span<const float> input,
   constexpr double kRolloff = 0.99;
   constexpr double kWidth = 6.0;  // lowpass_filter_width
   const double base_freq = double(std::min(orig, fresh)) * kRolloff;
-  const auto width = static_cast<std::int64_t>(
-      std::ceil(kWidth * double(orig) / base_freq));
+  const auto width =
+      static_cast<std::int64_t>(std::ceil(kWidth * double(orig) / base_freq));
   const std::int64_t taps = 2 * width + orig;
   std::vector<float> kernels(std::size_t(fresh) * std::size_t(taps));
   for (std::int64_t i = 0; i < fresh; ++i)
@@ -218,8 +219,9 @@ std::vector<float> ReferenceExcerpt(const StereoAudio& audio,
   };
   std::mt19937_64 rng(seed);
   auto draw = [&](std::size_t upper) -> std::size_t {
-    return upper == 0 ? 0
-                      : std::uniform_int_distribution<std::size_t>(0, upper)(rng);
+    return upper == 0
+               ? 0
+               : std::uniform_int_distribution<std::size_t>(0, upper)(rng);
   };
   const std::size_t part = total / 3;
   const std::size_t starts[3] = {

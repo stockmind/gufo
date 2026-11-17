@@ -5,16 +5,19 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <gufo/ext/generated/ace_step_constants.hpp>
+#include <gufo/ext/json.hpp>
+#include <gufo/ext/music.hpp>
+#include <gufo/ext/options.hpp>
+#include <gufo/ext/registry.hpp>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include <gufo/ext/generated/ace_step_constants.hpp>
-#include <gufo/ext/music.hpp>
-#include <gufo/ext/options.hpp>
-#include <gufo/ext/registry.hpp>
-
+#include "src/models/ace_step/audio_io.hpp"
 #include "src/models/ace_step/pipeline.hpp"
 
 namespace gufo::models::ace_step {
@@ -24,6 +27,47 @@ bool ProbeAceStep(std::string_view model_root);
 bool ResolveAceStepArtifacts(std::string_view model_root, std::string* error);
 
 namespace {
+
+// Optional source/reference audio for the edit tasks. The HTTP layer passes a
+// path inside the container (the queue writes uploads into the mounted job
+// root), which keeps large audio out of the JSON body.
+bool LoadPlanarWav(const std::string& path, std::vector<float>* planar,
+                   std::string* error) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    *error = "cannot read audio: " + path;
+    return false;
+  }
+  const std::string bytes((std::istreambuf_iterator<char>(in)), {});
+  StereoAudio audio;
+  std::string decode_error;
+  if (!DecodeWavStereo(std::span<const std::uint8_t>(
+                           reinterpret_cast<const std::uint8_t*>(bytes.data()),
+                           bytes.size()),
+                       &audio, &decode_error)) {
+    *error = path + ": " + decode_error;
+    return false;
+  }
+  NormalizeStereo48k(&audio);
+  *planar = std::move(audio.planar);
+  return true;
+}
+
+MusicTask ParseTask(std::string_view name) {
+  if (name == "repaint")
+    return MusicTask::kRepaint;
+  if (name == "cover")
+    return MusicTask::kCover;
+  if (name == "cover-nofsq")
+    return MusicTask::kCoverNoFsq;
+  if (name == "extract")
+    return MusicTask::kExtract;
+  if (name == "lego")
+    return MusicTask::kLego;
+  if (name == "complete")
+    return MusicTask::kComplete;
+  return MusicTask::kText2Music;
+}
 
 constexpr std::uint32_t kSampleRate = 48000;
 constexpr double kMaxSeconds = 600.0;
@@ -115,15 +159,71 @@ public:
       mapped.keyscale = *request.key;
     if (request.beats_per_bar.has_value())
       mapped.timesignature = std::to_string(*request.beats_per_bar);
-    mapped.duration =
-        std::clamp(request.duration_seconds.value_or(kDefaultSeconds), 1.0,
-                   kMaxSeconds);
+    mapped.duration = std::clamp(
+        request.duration_seconds.value_or(kDefaultSeconds), 1.0, kMaxSeconds);
     mapped.seed = request.seed;
     if (request.steps.has_value())
       mapped.steps = *request.steps;
     if (request.guidance.has_value())
       mapped.guidance_scale = *request.guidance;
     mapped.task = MusicTask::kText2Music;
+
+    // Advanced controls travel in provider_json (gufo.options): the edit tasks
+    // and the sampler knobs the CLI exposes. Anything unknown is ignored.
+    if (!request.provider_json.empty()) {
+      json::Value options;
+      try {
+        options = json::parse(request.provider_json);
+      } catch (const std::exception& exception) {
+        if (error != nullptr)
+          *error = std::string("options: ") + exception.what();
+        return false;
+      }
+      const auto* task = options.find("task");
+      if (task != nullptr && task->is_string())
+        mapped.task = ParseTask(task->str());
+      if (const auto* value = options.find("shift");
+          value != nullptr && value->is_number())
+        mapped.shift = static_cast<float>(value->as_double(0.0));
+      if (const auto* value = options.find("repaint_start");
+          value != nullptr && value->is_number())
+        mapped.repaint_start = value->as_double(0.0);
+      if (const auto* value = options.find("repaint_end");
+          value != nullptr && value->is_number())
+        mapped.repaint_end = value->as_double(-1.0);
+      if (const auto* value = options.find("repaint_mode");
+          value != nullptr && value->is_string())
+        mapped.repaint_mode = value->str();
+      if (const auto* value = options.find("repaint_strength");
+          value != nullptr && value->is_number())
+        mapped.repaint_strength = static_cast<float>(value->as_double(0.5));
+      if (const auto* value = options.find("cover_strength");
+          value != nullptr && value->is_number())
+        mapped.cover_strength = static_cast<float>(value->as_double(1.0));
+      if (const auto* value = options.find("cover_noise_strength");
+          value != nullptr && value->is_number())
+        mapped.cover_noise_strength = static_cast<float>(value->as_double(0.0));
+      if (const auto* value = options.find("track");
+          value != nullptr && value->is_string())
+        mapped.track = value->str();
+      if (mapped.task != MusicTask::kText2Music) {
+        const auto* source = options.find("source");
+        if (source == nullptr || !source->is_string() ||
+            source->str().empty()) {
+          if (error != nullptr)
+            *error = "this task needs a source audio path";
+          return false;
+        }
+        if (!LoadPlanarWav(source->str(), &mapped.source_audio, error))
+          return false;
+        if (const auto* reference = options.find("reference");
+            reference != nullptr && reference->is_string() &&
+            !reference->str().empty()) {
+          if (!LoadPlanarWav(reference->str(), &mapped.reference_audio, error))
+            return false;
+        }
+      }
+    }
 
     std::vector<float> planar;
     MusicTelemetry telemetry;
@@ -171,8 +271,7 @@ std::unique_ptr<ext::MusicRunner> CreateAceStepRunner(
   ModelPaths paths;
   if (!ModelPaths::Resolve(options.model_root, Option(options.options, "--dit"),
                            Option(options.options, "--lm"),
-                           Option(options.options, "--variant"), &paths,
-                           error))
+                           Option(options.options, "--variant"), &paths, error))
     return nullptr;
   auto pipeline = MusicPipeline::Load(paths, error);
   if (!pipeline)
