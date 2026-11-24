@@ -722,8 +722,28 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const ModelWeights& w, const core::GgufReader& reader,
     const MtpWeights* mtp, const core::GgufReader* mtp_reader,
     std::string* error_msg) {
+  const auto regions = reader.GetMappedRegions();
+  std::vector<core::GgufMappedRegion> shards(regions.begin(), regions.end());
+  const auto shard_count = static_cast<std::uint32_t>(shards.size());
+  if (mtp != nullptr) {
+    if (mtp_reader == nullptr) {
+      if (error_msg)
+        *error_msg = "MTP weights require their bound reader";
+      return nullptr;
+    }
+    const auto extra = mtp_reader->GetMappedRegions();
+    shards.insert(shards.end(), extra.begin(), extra.end());
+  }
+  return UploadShards(w, mtp, std::move(shards), shard_count, nullptr,
+                      error_msg);
+}
+
+std::unique_ptr<DeviceModel> DeviceModel::UploadShards(
+    const ModelWeights& w, const MtpWeights* mtp,
+    std::vector<core::GgufMappedRegion> shards, std::uint32_t shard_count,
+    flash_next::WeightSource* source, std::string* error_msg) {
   // The binder already restricts every tensor to a format the runtime can
-  // decode. Q6_K is now read by the embedding (RowElement) and small-matrix
+  // decode. Q6_K is read by the embedding (RowElement) and small-matrix
   // (SmallGemm) kernels, so no per-format rejection is needed here.
   const auto supported = [&](const TensorRef&) { return true; };
   const auto layer_supported = [&](const LayerWeights& l) {
