@@ -7,6 +7,7 @@ to run the model and what speed to expect.
 <!-- BEGIN GENERATED MODEL TABLE -->
 | Model | Weights / supported inputs | Guide |
 | --- | --- | --- |
+| ACE-Step 1.5 XL | Style text and lyrics to 48 kHz stereo music; optional bpm, key, time signature, language and planner | [Usage](ace-step-1.5.md) |
 | DeepSeek V4 Flash | Flash 0731 mixed IQ2/Q2/Q8 GGUF; text | [Usage and modes](deepseek-v4-flash.md) |
 | EmbeddingGemma 2 | BF16 safetensors; text/image to embeddings | [Usage](embeddinggemma-2.md) |
 | Inkling 2 Mini | Unsloth UD-Q4_K_XL GGUF; text/images | [Usage](inkling-2-mini.md) |

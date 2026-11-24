@@ -34,15 +34,15 @@ REQUIRED_DOC_FILES = [
     "docs/internal/performance.md",
     # BEGIN GENERATED MODEL DOCS
     *[f"docs/models/{model}.md"
-      for model in ("deepseek-v4-flash", "embeddinggemma-2", "inkling-2-mini",
-                    "loom", "minimax-h3", "qwen-image-2.1",
-                    "qwen3-asr", "qwen3-tts", "qwen3.8-27b",
-                    "qwen3.8-flash-next", "yue2")],
+      for model in ("ace-step-1.5", "deepseek-v4-flash", "embeddinggemma-2",
+                    "inkling-2-mini", "loom", "minimax-h3",
+                    "qwen-image-2.1", "qwen3-asr", "qwen3-tts",
+                    "qwen3.8-27b", "qwen3.8-flash-next", "yue2")],
     *[f"docs/internal/models/{model}/{document}.md"
-      for model in ("deepseek-v4-flash", "embeddinggemma-2", "inkling-2-mini",
-                    "loom", "minimax-h3", "qwen-image-2.1",
-                    "qwen3-asr", "qwen3-tts", "qwen3.8-27b",
-                    "qwen3.8-flash-next", "yue2")
+      for model in ("ace-step-1.5", "deepseek-v4-flash", "embeddinggemma-2",
+                    "inkling-2-mini", "loom", "minimax-h3",
+                    "qwen-image-2.1", "qwen3-asr", "qwen3-tts",
+                    "qwen3.8-27b", "qwen3.8-flash-next", "yue2")
       for document in ("BENCHMARKS", "QUALITY", "EXPERIMENTS")],
     # END GENERATED MODEL DOCS
 ]
