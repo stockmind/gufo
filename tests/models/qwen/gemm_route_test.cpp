@@ -83,9 +83,9 @@ void TestFormatCapabilities() {
   // opt-q4kxl: every format the UD-Q4_K_XL shard uses is decoded in-kernel, so
   // all of them are direct on both GPU paths. Q4_K in particular used to be
   // CPU-only.
-  for (const auto type : {GgmlType::kQ4_K, GgmlType::kQ3_K, GgmlType::kIQ4_NL,
-                          GgmlType::kIQ4_XS, GgmlType::kIQ3_S,
-                          GgmlType::kIQ3_XXS}) {
+  for (const auto type :
+       {GgmlType::kQ4_K, GgmlType::kQ3_K, GgmlType::kIQ4_NL, GgmlType::kIQ4_XS,
+        GgmlType::kIQ3_S, GgmlType::kIQ3_XXS}) {
     Check(DescribeQwenGemmFormat(type).quantized,
           "mixed low-bit format is quantized");
     Check(DescribeQwenGemmFormat(type).cpu_direct, "mixed low-bit CPU support");
