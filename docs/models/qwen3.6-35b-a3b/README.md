@@ -80,7 +80,7 @@ MoE numeric route than single-token decode, so near-tied tokens can flip late
 in a long answer. The Qwen3.8 27B keeps that contract; this model does not yet.
 
 Thinking/template controls and HTTP sampling defaults are described in
-[the server guide](../../SERVER.md#reasoning-controls).
+[the server guide](../../server.md#reasoning-controls).
 
 ## Scope
 
